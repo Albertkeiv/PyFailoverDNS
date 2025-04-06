@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+dnspython
+pyyaml
+pydantic
+dnslib
