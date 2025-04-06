@@ -28,6 +28,12 @@ def get_ip_for_domain(domain: str) -> str:
     logging.debug(f"[CACHE SET] Domain: {domain}, IP: {ip}")
     return ip
 
+def get_domain_config(domain: str) -> dict:
+    for zone in state["config"].get("zones", []):
+        domains = zone.get("domains", {})
+        if domain in domains:
+            return domains[domain]
+    return {}
 
 def calculate_best_ip(domain: str) -> str:
     checks = state["checks"].get(domain, {})
@@ -35,9 +41,9 @@ def calculate_best_ip(domain: str) -> str:
         logging.warning(f"No checks recorded for domain: {domain}")
         return get_fallback(domain)
 
-    config = state["config"]
-    logic_cfg = config.get("logic", {})
-    timeout_sec = logic_cfg.get("timeout_sec", 60)
+    domain_cfg = get_domain_config(domain)
+    timeout_sec = domain_cfg.get("timeout_sec", 60)
+    ttl = domain_cfg.get("resolve_cache_ttl", 5)
 
     now = datetime.now(timezone.utc)
     valid_hosts = []
