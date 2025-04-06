@@ -13,5 +13,12 @@ zones:
       webmail.failover:
         fallback_ip: "10.10.10.254"
         policy: any
+        mode: tcp
+        monitor_tag: test
         timeout_sec: 60
         resolve_cache_ttl: 5
+        targets:
+          - ip: 10.10.10.250
+            port: 443
+          - ip: 10.10.10.251
+            port: 443

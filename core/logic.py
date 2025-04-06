@@ -50,10 +50,10 @@ def calculate_best_ip(domain: str) -> str:
 
     for ip, agents in checks.items():
         for agent_id, data in agents.items():
-            ts = parse_timestamp(data["timestamp"])
+            ts = data["timestamp"]  # Уже datetime, ничего парсить не нужно
             if (now - ts).total_seconds() <= timeout_sec and data["status"] == "ok":
                 valid_hosts.append(ip)
-                break
+            break
 
     if valid_hosts:
         return valid_hosts[0]
@@ -72,15 +72,10 @@ def get_fallback(domain: str) -> str:
     )
     return fallback_ip or "127.0.0.1"
 
+def get_ttl_for_domain(domain: str) -> int:
+    domain_cfg = get_domain_config(domain)
+    return domain_cfg.get("resolve_cache_ttl", 5)
 
-def parse_timestamp(ts: str) -> datetime:
-    try:
-        if ts.endswith("Z"):
-            ts = ts.replace("Z", "+00:00")
-        return datetime.fromisoformat(ts)
-    except Exception:
-        return datetime.now(timezone.utc)
-    
 def update_status(report):
     domain = report.domain
     host = report.target_ip
@@ -96,3 +91,49 @@ def update_status(report):
     # Опционально: сброс кэша, если хочешь, чтобы новые данные сразу применялись
     if domain in state.get("resolved", {}):
         del state["resolved"][domain]
+
+def extract_monitor_tasks(agent_tags: list[str]) -> list[dict]:
+    """
+    Возвращает список заданий на мониторинг, подходящих агенту по его тегам.
+    """
+    tasks = []
+    config = state.get("config", {})
+    zones = config.get("zones", [])
+
+    for zone in zones:
+        domains = zone.get("domains", {})
+        for domain, domain_cfg in domains.items():
+            monitor_tags = domain_cfg.get("monitor_tag", "")
+            if isinstance(monitor_tags, str):
+                monitor_tags = monitor_tags.split()
+            elif not isinstance(monitor_tags, list):
+                continue  # некорректный формат
+
+            # если хотя бы один тег совпадает
+            if not set(monitor_tags) & set(agent_tags):
+                continue
+
+            mode = domain_cfg.get("mode", "tcp")
+            timeout = domain_cfg.get("timeout_sec", 10)
+            interval = domain_cfg.get("interval_sec", 30)
+            targets = domain_cfg.get("targets", [])
+
+            for target in targets:
+                ip = target.get("ip")
+                port = target.get("port")
+                if not ip or not port:
+                    continue
+
+                check_name = f"{domain}:{ip}:{port}"
+
+                tasks.append({
+                    "check_name": check_name,
+                    "domain": domain,
+                    "target_ip": ip,
+                    "port": port,
+                    "type": mode,
+                    "timeout_sec": timeout,
+                    "interval_sec": interval
+                })
+
+    return tasks

@@ -1,9 +1,10 @@
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 
 class ReportModel(BaseModel):
     agent_id: str
-    timestamp: str
+    timestamp: datetime
     check_name: str
     domain: str
     type: str
