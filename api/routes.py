@@ -4,7 +4,6 @@ from typing import List
 from core.logic import update_status, extract_monitor_tasks
 from api.models import ReportModel
 from core.state import state
-from core.logic import update_status
 import logging
 
 log = logging.getLogger("API")
