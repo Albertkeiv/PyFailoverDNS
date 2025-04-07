@@ -19,4 +19,8 @@ async def receive_report(report: ReportModel, request: Request):
 async def get_tasks(tags: str = Query(..., description="Через запятую: 'eu-west4,gcp'")):
     tag_list = [tag.strip() for tag in tags.split(",") if tag.strip()]
     tasks = extract_monitor_tasks(tag_list)
+    log.warning(f"[DEBUG] Returning {len(tasks)} tasks for tags: {tag_list}")
+    for task in tasks:
+        log.warning(f"[DEBUG] Task: {task}")
+        
     return {"tasks": tasks}

@@ -22,10 +22,10 @@ zones:
           mode: tcp
           monitor_tag: test
           targets:
-            - ip: 10.10.10.250
-              port: 443
-            - ip: 10.10.10.251
-              port: 443
+            - ip: 208.95.112.1
+              port: 80
+            - ip: 34.117.59.81
+              port: 80
         agent:
           interval_sec: 30     # для агента
           timeout_sec: 5

@@ -1,0 +1,8 @@
+agent_id: test-main
+
+servers:
+  - name: server1
+    url: http://localhost:8000
+    tags:
+      - test
+      - gcp

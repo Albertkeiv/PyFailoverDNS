@@ -1,32 +1,30 @@
 from core.state import state
 from datetime import datetime, timezone
 import logging
+import random
 
 log = logging.getLogger("CACHE")
 
-def get_ip_for_domain(domain: str) -> str:
-    # Проверка кэша
+def get_ip_for_domain(domain: str) -> list[str]:
     cached = state["resolved"].get(domain)
-    ttl = state["config"].get("dns", {}).get("resolve_cache_ttl", 5)
+    ttl = get_ttl_for_domain(domain)
     now = datetime.now(timezone.utc)
 
     if cached:
         age = (now - cached["timestamp"]).total_seconds()
         if age <= ttl:
-            logging.debug(f"[CACHE HIT] Domain: {domain}, IP: {cached['ip']}")
-            return cached["ip"]
+            logging.debug(f"[CACHE HIT] Domain: {domain}, IPs: {cached['ips']}")
+            return cached["ips"]
 
-    # Пересчёт, если кэш отсутствует или устарел
-    ip = calculate_best_ip(domain)
+    ip_list = get_alive_ips(domain)
 
-    # Сохраняем в кэш
     state["resolved"][domain] = {
-        "ip": ip,
+        "ips": ip_list,
         "timestamp": now
     }
 
-    logging.debug(f"[CACHE SET] Domain: {domain}, IP: {ip}")
-    return ip
+    logging.debug(f"[CACHE SET] Domain: {domain}, IPs: {ip_list}")
+    return ip_list
 
 def get_domain_config(domain: str) -> dict:
     for zone in state["config"].get("zones", []):
@@ -34,6 +32,39 @@ def get_domain_config(domain: str) -> dict:
         if domain in domains:
             return domains[domain]
     return {}
+
+def get_alive_ips(domain: str) -> list[str]:
+    checks = state["checks"].get(domain, {})
+    if not checks:
+        logging.warning(f"No checks recorded for domain: {domain}")
+        return get_fallback_list(domain)
+
+    domain_cfg = get_domain_config(domain)
+    timeout_sec = domain_cfg.get("server", {}).get("timeout_sec", 60)
+
+    now = datetime.now(timezone.utc)
+    valid_hosts = []
+
+    for ip, agents in checks.items():
+        for agent_id, data in agents.items():
+            ts = data["timestamp"]
+            if (now - ts).total_seconds() <= timeout_sec and data["status"] == "ok":
+                valid_hosts.append(ip)
+                break
+
+    if valid_hosts:
+        random.shuffle(valid_hosts)  # 🎲 Рандомизируем порядок IP
+        return valid_hosts
+
+    logging.warning(f"All checks for {domain} are expired or failed")
+    return get_fallback_list(domain)
+
+def get_fallback_list(domain: str) -> list[str]:
+    cfg = get_domain_config(domain)
+    fallback_list = cfg.get("fallback", [])
+    if isinstance(fallback_list, list) and fallback_list:
+        return fallback_list
+    return ["127.0.0.1"]
 
 def calculate_best_ip(domain: str) -> str:
     checks = state["checks"].get(domain, {})
@@ -114,23 +145,29 @@ def extract_monitor_tasks(agent_tags: list[str]) -> list[dict]:
             interval = agent_cfg.get("interval_sec", 30)
             targets = monitor_cfg.get("targets", [])
 
+            log.warning(f"[DEBUG] Domain: {domain}")
+            log.warning(f"[DEBUG] Type of targets: {type(targets)}")
+            log.warning(f"[DEBUG] Targets raw content: {targets}")
+            log.warning(f"[DEBUG] Number of targets: {len(targets)}")
+
             for target in targets:
                 ip = target.get("ip")
                 port = target.get("port")
                 if not ip or not port:
-                    log.warning(f"Skipping invalid target in domain '{domain}': ip={ip}, port={port}")
-                continue
+                    log.warning(f"[DEBUG] Skipping invalid target: {target}")
+                    continue
 
-            check_name = f"{domain}:{ip}:{port}"
+                check_name = f"{domain}:{ip}:{port}"
+                log.debug(f"[MONITOR TASK] {check_name} ({ip}:{port}) for tags={agent_tags}")
 
-            tasks.append({
-                "check_name": check_name,
-                "domain": domain,
-                "target_ip": ip,
-                "port": port,
-                "type": mode,
-                "timeout_sec": timeout,
-                "interval_sec": interval
-            })
+                tasks.append({
+                    "check_name": check_name,
+                    "domain": domain,
+                    "target_ip": ip,
+                    "port": port,
+                    "type": mode,
+                    "timeout_sec": timeout,
+                    "interval_sec": interval
+                })
 
     return tasks
