@@ -91,15 +91,10 @@ servers:
 
 ## Зависимости
 + fastapi
-
 + uvicorn
-
 + dnslib
-
 + pyyaml
-
 + pydantic
-
 + dnspython
 
 ## Интеграция с CoreDNS

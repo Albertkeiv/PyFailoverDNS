@@ -91,15 +91,10 @@ servers:
 
 ## Dependencies:
 + fastapi
-
 + uvicorn
-
 + dnslib
-
 + pyyaml
-
 + pydantic
-
 + dnspython
 
 ## Integration with CoreDNS:
