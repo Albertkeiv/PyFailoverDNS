@@ -64,7 +64,7 @@ zones:
           mode: tcp
           monitor_tag: test
           targets:
-            - ip: 208.95.112.1
+            - ip: 10.10.10.250
               port: 80
         agent:
           interval_sec: 30
@@ -77,7 +77,7 @@ agent_id: example
 
 servers:
   - name: server1
-    url: http://localhost:8000
+    url: http://server_ip_or_dns:8000
     tags:
       - test
 ```
