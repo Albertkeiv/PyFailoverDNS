@@ -133,7 +133,7 @@ failover {
 
 ### Пример запроса
 ```
-dig @127.0.0.1 -p 53 webmail.failover
+dig @127.0.0.1 -p 8053 webmail.failover
 ```
 
 CoreDNS передаст запрос PyFailoverDNS, который вернёт IP на основе состояния агентов.

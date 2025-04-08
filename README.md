@@ -136,7 +136,7 @@ failover {
 
 ### Example DNS query:
 ```
-dig @127.0.0.1 -p 53 webmail.failover
+dig @127.0.0.1 -p 8053 webmail.failover
 ```
 
 CoreDNS will forward the request to PyFailoverDNS, which replies based on current agent checks.
