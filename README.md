@@ -129,10 +129,30 @@ failover {
 
 ### Example DNS query:
 ```
-dig @127.0.0.1 -p 8053 webmail.failover
+dig @{coredns_ip} -p 8053 webmail.failover
 ```
 
 CoreDNS will forward the request to PyFailoverDNS, which replies based on current agent checks.
+
+## Integration with dnsmasq
+You can use PyFailoverDNS with dnsmasq to forward .failover domain queries to your local PyFailoverDNS instance.
+
+### Example configuration (/etc/dnsmasq.d/failover.conf):
+```
+server=/failover/127.0.0.1#8053
+```
+
+### Explanation:
++ Any DNS queries ending in .failover will be forwarded to PyFailoverDNS running on port 8053.
+
++ All other domains will be resolved via the default DNS flow.
+
+### After editing the configuration:
+`sudo systemctl restart dnsmasq`
+
+### Example query:
+`dig webmail.failover @<dnsmasq_ip>`
+
 
 ## Roadmap
 + Support for additional failover policies: quorum, all, priority

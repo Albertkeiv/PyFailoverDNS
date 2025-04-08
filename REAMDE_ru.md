@@ -129,10 +129,30 @@ failover {
 
 ### Пример запроса
 ```
-dig @127.0.0.1 -p 8053 webmail.failover
+dig @<coredns_ip> -p 8053 webmail.failover
 ```
 
 CoreDNS передаст запрос PyFailoverDNS, который вернёт IP на основе состояния агентов.
+
+## Интеграция с dnsmasq
+Вы можете использовать PyFailoverDNS в связке с dnsmasq, чтобы перенаправлять запросы к доменам .failover на локальный DNS-сервер PyFailoverDNS.
+
+### Пример конфигурации (/etc/dnsmasq.d/failover.conf):
+```
+server=/failover/127.0.0.1#8053
+```
+
+### Объяснение:
++ Все запросы к доменам, оканчивающимся на .failover, будут перенаправляться на локальный PyFailoverDNS (порт 8053).
+
++ Остальные DNS-запросы будут обрабатываться как обычно.
+
+### После изменения конфигурации:
+`sudo systemctl restart dnsmasq`
+
+### Пример запроса:
+`dig webmail.failover @<dnsmasq_ip>`
+
 
 ## Планы на будущее
 + Поддержка дополнительных политик отказоустойчивости: quorum, all, priority
