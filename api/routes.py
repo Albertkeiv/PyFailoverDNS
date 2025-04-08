@@ -1,9 +1,9 @@
-from fastapi import FastAPI, Request
-from fastapi import FastAPI, Request, Query
+from fastapi import FastAPI, Request, Query, HTTPException
 from typing import List
-from core.logic import update_status, extract_monitor_tasks
+from core.logic import update_status, extract_monitor_tasks,get_domain_status,get_domain_details
 from api.models import ReportModel
 from core.state import state
+from fastapi.responses import JSONResponse
 import logging
 
 log = logging.getLogger("API")
@@ -24,3 +24,18 @@ async def get_tasks(tags: str = Query(..., description="Через запяту�
         log.warning(f"[DEBUG] Task: {task}")
         
     return {"tasks": tasks}
+
+@app.get("/api/v1/status")
+async def status_summary():
+    return JSONResponse(content={"status": get_domain_status()})
+
+@app.get("/api/v1/status/{domain}")
+async def status_domain(domain: str):
+    config_domains = []
+    for zone in state["config"].get("zones", []):
+        config_domains += zone.get("domains", {}).keys()
+
+    if domain not in config_domains:
+        raise HTTPException(status_code=404, detail="Domain not found")
+
+    return get_domain_details(domain)
