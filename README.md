@@ -10,6 +10,8 @@ Traditional DNS records do not reflect the current state of the infrastructure. 
 
 + Return fallback IPs in case of full outage
 
+![Scheme](docs/image/scheme1.png)
+
 # Features:
 
 + Supports multiple zones and domains
