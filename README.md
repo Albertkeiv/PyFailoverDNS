@@ -90,7 +90,6 @@ servers:
 `python agent.py --config <path_to_config.yaml>`
 
 ## Dependencies:
-
 + fastapi
 
 + uvicorn
@@ -104,7 +103,6 @@ servers:
 + dnspython
 
 ## Integration with CoreDNS:
-
 If you already use CoreDNS (e.g. in a Kubernetes environment), you can delegate a specific zone like .failover to PyFailoverDNS.
 
 ### CoreDNS example (Corefile):
@@ -121,13 +119,11 @@ failover {
 ```
 
 ### Explanation:
-
 + All regular DNS zones will be resolved via 1.1.1.1 and 8.8.8.8.
 
 + Any domain under .failover (like webmail.failover) will be forwarded to PyFailoverDNS.
 
 ### To use this setup:
-
 1. Make sure PyFailoverDNS is listening on 0.0.0.0:8053 or localhost:8053.
 
 2. Ensure your config.yaml includes the failover zone and relevant domains.
@@ -140,3 +136,13 @@ dig @127.0.0.1 -p 8053 webmail.failover
 ```
 
 CoreDNS will forward the request to PyFailoverDNS, which replies based on current agent checks.
+
+## Roadmap
++ Support for additional failover policies: quorum, all, priority
+
++ Docker images for both master and agent
+
++ New check types: HTTP, ICMP, etc.
+
++ Prometheus metrics support
+
