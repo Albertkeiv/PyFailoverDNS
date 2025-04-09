@@ -12,8 +12,12 @@ def load_config(path):
 
 def fetch_tasks(server):
     url = f"{server['url']}/api/v1/tasks?tags={','.join(server['tags'])}"
+    headers = {}
+    if "token" in server:
+        headers["X-API-Key"] = server["token"]
+
     try:
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, headers=headers, timeout=5)
         response.raise_for_status()
         return response.json().get("tasks", [])
     except Exception as e:
@@ -47,8 +51,13 @@ def report_result(server, agent_id, task, result):
         "latency_ms": result.get("latency_ms"),
         "reason": result.get("reason"),
     }
+
+    headers = {}
+    if "token" in server:
+        headers["X-API-Key"] = server["token"]
+
     try:
-        res = requests.post(f"{server['url']}/api/v1/report", json=payload, timeout=5)
+        res = requests.post(f"{server['url']}/api/v1/report", json=payload, headers=headers, timeout=5)
         print(f"[{server['name']}] Reported: {task['check_name']} → {result['status']}")
     except Exception as e:
         print(f"[{server['name']}] [ERROR] Failed to report result: {e}")

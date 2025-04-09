@@ -178,6 +178,8 @@ def get_domain_status() -> list[dict]:
 
 def get_domain_details(domain: str) -> dict:
     cfg = get_domain_config(domain)
+    targets = cfg.get("monitor", {}).get("targets", [])
+    ip_to_port = {target["ip"]: target["port"] for target in targets if "ip" in target and "port" in target}
     fallback = cfg.get("fallback", [])
     timeout = cfg.get("server", {}).get("timeout_sec", 60)
     monitor_mode = cfg.get("monitor", {}).get("mode", "tcp")
@@ -209,6 +211,7 @@ def get_domain_details(domain: str) -> dict:
 
         ip_status[ip] = {
             "status": "ok" if ip_ok else "fail",
+            "port": ip_to_port.get(ip),
             "agents": agent_reports
         }
 
