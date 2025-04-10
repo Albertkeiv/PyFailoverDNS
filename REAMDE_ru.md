@@ -70,6 +70,7 @@ zones:
         agent:
           interval_sec: 30
           timeout_sec: 5
+          token: "secret_token"
 ```
 
 ## Пример конфигурации агента agent_config.yaml
@@ -79,6 +80,7 @@ agent_id: example
 servers:
   - name: server1
     url: http://server_ip_or_dns:8000
+    token: "secret_token"
     tags:
       - test
 ```

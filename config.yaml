@@ -29,4 +29,4 @@ zones:
         agent:
           interval_sec: 10     # для агента
           timeout_sec: 5
-          token: "123"
+          token: "secret_token"

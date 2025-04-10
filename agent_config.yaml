@@ -3,7 +3,7 @@ agent_id: test-main
 servers:
   - name: server1
     url: http://localhost:8000
-    token: "123"
+    token: "secret_token"
     tags:
       - test
       - gcp
