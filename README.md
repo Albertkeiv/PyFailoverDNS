@@ -67,7 +67,9 @@ zones:
           monitor_tag: test
           targets:
             - ip: 10.10.10.250
-              port: 80
+              port: 443
+            - ip: 10.10.10.251
+              port: 443
         agent:
           interval_sec: 30
           timeout_sec: 5
