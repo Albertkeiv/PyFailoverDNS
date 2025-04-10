@@ -1,4 +1,5 @@
 # PyFailoverDNS
+![Logo](docs/image/logo.png)
 PyFailoverDNS is a fault-tolerant DNS system that dynamically returns IP addresses based on the actual availability of target hosts. Its main goal is to ensure uninterrupted access to services with automatic fallback to alternative IPs in case of failures.
 
 ## Why it matters:
