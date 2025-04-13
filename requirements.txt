@@ -4,3 +4,8 @@ dnspython
 pyyaml
 pydantic
 dnslib
+pytest
+pytest-asyncio
+httpx
+respx
+pytest-mock
