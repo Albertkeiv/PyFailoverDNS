@@ -6,34 +6,32 @@ from datetime import datetime, timezone
 
 client = TestClient(app)
 
-@pytest.fixture(autouse=True)
-def reset_state():
-    state["config"] = {
-        "zones": [{
-            "name": "failover",
-            "domains": {
-                "webmail.failover": {
-                    "fallback": ["1.1.1.1"],
-                    "server": {"timeout_sec": 60}
-                }
-            }
-        }]
-    }
-    state["checks"] = {}
+@pytest.fixture
+def domain_info():
+    domain = list(state["config"]["zones"][0]["domains"].keys())[0]
+    cfg = state["config"]["zones"][0]["domains"][domain]
+    fallback = cfg.get("fallback", [])
+    return domain, fallback
 
-def test_post_report():
+def test_post_report(domain_info):
+    domain, _ = domain_info
+    target = state["config"]["zones"][0]["domains"][domain]["monitor"]["targets"][0]
+
     payload = {
         "agent_id": "agent1",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "check_name": "webmail.failover:1.2.3.4:80",
-        "domain": "webmail.failover",
+        "check_name": f"{domain}:{target['ip']}:{target['port']}",
+        "domain": domain,
         "type": "tcp",
-        "target_ip": "1.2.3.4",
-        "port": 80,
+        "target_ip": target["ip"],
+        "port": target["port"],
         "status": "ok",
         "latency_ms": 12.3
     }
-    response = client.post("/api/v1/report", json=payload)
+
+    token = state["config"]["zones"][0]["domains"][domain]["agent"]["token"]
+
+    response = client.post("/api/v1/report", json=payload, headers={"X-API-Key": token})
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
@@ -41,29 +39,15 @@ def test_get_tasks_no_tags():
     response = client.get("/api/v1/tasks")
     assert response.status_code == 422  # Required query param
 
-def test_get_tasks_with_tags():
-    def mock_extract_monitor_tasks(tags):
-        return [{
-            "domain": "webmail.failover",
-            "check_name": "webmail.failover:127.0.0.1:80",
-            "target_ip": "127.0.0.1",
-            "port": 80,
-            "type": "tcp",
-            "timeout_sec": 10,
-            "interval_sec": 30
-        }]
-    
-    import api.routes
-    original = api.routes.extract_monitor_tasks
-    api.routes.extract_monitor_tasks = mock_extract_monitor_tasks
+def test_get_tasks_with_tags(domain_info):
+    domain, _ = domain_info
+    token = state["config"]["zones"][0]["domains"][domain]["agent"]["token"]
 
-    response = client.get("/api/v1/tasks?tags=test")
+    response = client.get("/api/v1/tasks?tags=test", headers={"X-API-Key": token})
     assert response.status_code == 200
     data = response.json()
     assert "tasks" in data
-    assert data["tasks"][0]["domain"] == "webmail.failover"
-
-    api.routes.extract_monitor_tasks = original  # восстановить
+    assert any(task["domain"] == domain for task in data["tasks"])
 
 def test_get_status_summary():
     response = client.get("/api/v1/status")
@@ -74,10 +58,12 @@ def test_get_status_domain_not_found():
     response = client.get("/api/v1/status/nonexistent.failover")
     assert response.status_code == 404
 
-def test_get_status_domain_found():
-    domain = "webmail.failover"
+def test_get_status_domain_found(domain_info):
+    domain, _ = domain_info
+    target = state["config"]["zones"][0]["domains"][domain]["monitor"]["targets"][0]
+
     state["checks"][domain] = {
-        "1.2.3.4": {
+        target["ip"]: {
             "agent1": {
                 "status": "ok",
                 "timestamp": datetime.now(timezone.utc),
@@ -88,6 +74,25 @@ def test_get_status_domain_found():
 
     response = client.get(f"/api/v1/status/{domain}")
     assert response.status_code == 200
-    json = response.json()
-    assert json["domain"] == domain
-    assert "ip_checks" in json
+    data = response.json()
+    assert data["domain"] == domain
+    assert "ip_checks" in data
+
+def test_post_report_invalid_token(domain_info):
+    domain, _ = domain_info
+    target = state["config"]["zones"][0]["domains"][domain]["monitor"]["targets"][0]
+
+    payload = {
+        "agent_id": "agent1",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "check_name": f"{domain}:{target['ip']}:{target['port']}",
+        "domain": domain,
+        "type": "tcp",
+        "target_ip": target["ip"],
+        "port": target["port"],
+        "status": "ok",
+        "latency_ms": 12.3
+    }
+
+    response = client.post("/api/v1/report", json=payload, headers={"X-API-Key": "WRONG"})
+    assert response.status_code == 403

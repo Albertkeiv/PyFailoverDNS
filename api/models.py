@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Literal
 from datetime import datetime
 
 class ReportModel(BaseModel):
@@ -10,6 +10,6 @@ class ReportModel(BaseModel):
     type: str
     target_ip: str
     port: Optional[int]
-    status: str  # "ok" / "fail"
+    status: Literal["ok", "fail"]
     latency_ms: Optional[float]
     reason: Optional[str] = None

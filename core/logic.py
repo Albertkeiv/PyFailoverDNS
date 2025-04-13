@@ -10,13 +10,19 @@ def get_ip_for_domain(domain: str) -> list[str]:
     ttl = get_ttl_for_domain(domain)
     now = datetime.now(timezone.utc)
 
+    domain_cfg = get_domain_config(domain)
+    policy = domain_cfg.get("server", {}).get("policy", "any")
+
     if cached:
         age = (now - cached["timestamp"]).total_seconds()
         if age <= ttl:
             logging.debug(f"[CACHE HIT] Domain: {domain}, IPs: {cached['ips']}")
+            if policy == "priority" and is_priority_mode(domain_cfg) and not using_fallback(cached["ips"], domain):
+                return [cached["ips"][0]]
             return cached["ips"]
 
     ip_list = get_alive_ips(domain)
+    fallback_used = using_fallback(ip_list, domain)
 
     state["resolved"][domain] = {
         "ips": ip_list,
@@ -24,7 +30,23 @@ def get_ip_for_domain(domain: str) -> list[str]:
     }
 
     logging.debug(f"[CACHE SET] Domain: {domain}, IPs: {ip_list}")
+    if policy == "priority" and is_priority_mode(domain_cfg) and not fallback_used:
+        return [ip_list[0]]
     return ip_list
+
+def is_priority_mode(domain_cfg: dict) -> bool:
+    """
+    Определяет, активна ли логика приоритетов:
+    - если policy указана как 'priority'
+    - и хотя бы один target содержит непустой priority
+    """
+    if domain_cfg.get("server", {}).get("policy") != "priority":
+        return False
+
+    targets = domain_cfg.get("monitor", {}).get("targets", [])
+    log.debug(f"[DEBUG is_priority_mode] Targets: {targets}")
+    return any("priority" in t and t["priority"] is not None for t in targets)
+
 
 def get_domain_config(domain: str) -> dict:
     for zone in state["config"].get("zones", []):
@@ -41,6 +63,7 @@ def get_alive_ips(domain: str) -> list[str]:
 
     domain_cfg = get_domain_config(domain)
     timeout_sec = domain_cfg.get("server", {}).get("timeout_sec", 60)
+    policy = domain_cfg.get("server", {}).get("policy", "any")
 
     now = datetime.now(timezone.utc)
     valid_hosts = []
@@ -52,12 +75,23 @@ def get_alive_ips(domain: str) -> list[str]:
                 valid_hosts.append(ip)
                 break
 
-    if valid_hosts:
-        random.shuffle(valid_hosts)  # Рандомизируем порядок IP
-        return valid_hosts
+    if not valid_hosts:
+        logging.warning(f"All checks for {domain} are expired or failed")
+        return get_fallback_list(domain)
 
-    logging.warning(f"All checks for {domain} are expired or failed")
-    return get_fallback_list(domain)
+    if policy == "priority":
+        targets = domain_cfg.get("monitor", {}).get("targets", [])
+        has_priorities = any("priority" in t for t in targets)
+
+        if has_priorities:
+            ip_to_priority = {t["ip"]: t.get("priority", 1000) for t in targets}
+            valid_hosts.sort(key=lambda ip: ip_to_priority.get(ip, 1000))
+        else:
+            random.shuffle(valid_hosts)
+    else:
+        random.shuffle(valid_hosts)
+
+    return valid_hosts
 
 def get_fallback_list(domain: str) -> list[str]:
     cfg = get_domain_config(domain)
@@ -67,30 +101,10 @@ def get_fallback_list(domain: str) -> list[str]:
     return ["127.0.0.1"]
 
 def calculate_best_ip(domain: str) -> str:
-    checks = state["checks"].get(domain, {})
-    if not checks:
-        logging.warning(f"No checks recorded for domain: {domain}")
-        return get_fallback(domain)
-
-    domain_cfg = get_domain_config(domain)
-    timeout_sec = domain_cfg.get("server", {}).get("timeout_sec", 60)
-
-    now = datetime.now(timezone.utc)
-    valid_hosts = []
-
-    for ip, agents in checks.items():
-        for agent_id, data in agents.items():
-            ts = data["timestamp"]
-            if (now - ts).total_seconds() <= timeout_sec and data["status"] == "ok":
-                valid_hosts.append(ip)
-                break
-
-    if valid_hosts:
-        return valid_hosts[0]
-
-    logging.warning(f"All checks for {domain} are expired or failed")
+    ips = get_alive_ips(domain)
+    if ips:
+        return ips[0]
     return get_fallback(domain)
-
 
 def get_fallback(domain: str) -> str:
     cfg = get_domain_config(domain)
@@ -116,13 +130,15 @@ def update_status(report):
 
     log.info(f"Received status from {agent} for {domain} → {host}: {report.status}")
 
-    # Опционально: сброс кэша, если хочешь, чтобы новые данные сразу применялись
     if domain in state.get("resolved", {}):
         del state["resolved"][domain]
 
-def get_domain_status() -> list[dict]:
-    from datetime import timezone
+def using_fallback(ip_list: list[str], domain: str) -> bool:
+    cfg = get_domain_config(domain)
+    fallback = cfg.get("fallback", [])
+    return ip_list == fallback or set(ip_list).issubset(set(fallback))
 
+def get_domain_status() -> list[dict]:
     now = datetime.now(timezone.utc)
     result = []
 
@@ -134,7 +150,6 @@ def get_domain_status() -> list[dict]:
             checks = state.get("checks", {}).get(domain, {})
             live_ips = []
             agent_map = {}
-
             latest_ts = None
 
             for ip, agents in checks.items():
@@ -191,8 +206,8 @@ def get_domain_details(domain: str) -> dict:
 
     for ip, agents in checks.items():
         agent_reports = []
-
         ip_ok = False
+
         for agent_id, data in agents.items():
             ts = data["timestamp"]
             age = (now - ts).total_seconds()
@@ -215,16 +230,15 @@ def get_domain_details(domain: str) -> dict:
             "agents": agent_reports
         }
 
-    # Проверим, есть ли хоть один ok
     has_live_ip = any(ipinfo["status"] == "ok" for ipinfo in ip_status.values())
 
     return {
-    "domain": domain,
-    "check_type": monitor_mode,   # ← Вот оно
-    "live": has_live_ip,
-    "fallback_ips": fallback,
-    "ip_checks": ip_status
-}
+        "domain": domain,
+        "check_type": monitor_mode,
+        "live": has_live_ip,
+        "fallback_ips": fallback,
+        "ip_checks": ip_status
+    }
 
 def extract_monitor_tasks(agent_tags: list[str]) -> list[dict]:
     tasks = []
@@ -251,20 +265,13 @@ def extract_monitor_tasks(agent_tags: list[str]) -> list[dict]:
             interval = agent_cfg.get("interval_sec", 30)
             targets = monitor_cfg.get("targets", [])
 
-            log.warning(f"[DEBUG] Domain: {domain}")
-            log.warning(f"[DEBUG] Type of targets: {type(targets)}")
-            log.warning(f"[DEBUG] Targets raw content: {targets}")
-            log.warning(f"[DEBUG] Number of targets: {len(targets)}")
-
             for target in targets:
                 ip = target.get("ip")
                 port = target.get("port")
                 if not ip or not port:
-                    log.warning(f"[DEBUG] Skipping invalid target: {target}")
                     continue
 
                 check_name = f"{domain}:{ip}:{port}"
-                log.debug(f"[MONITOR TASK] {check_name} ({ip}:{port}) for tags={agent_tags}")
 
                 tasks.append({
                     "check_name": check_name,
