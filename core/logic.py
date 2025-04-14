@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import logging
 import random
 
+_rr_counters = {}
 log = logging.getLogger("CACHE")
 
 def get_ip_for_domain(domain: str) -> list[str]:
@@ -284,3 +285,21 @@ def extract_monitor_tasks(agent_tags: list[str]) -> list[dict]:
                 })
 
     return tasks
+
+def get_dns_response(domain: str) -> tuple[list[str], int]:
+    """
+    Возвращает (список IP-адресов, TTL) для DNS-ответа по домену.
+    Учитывает политику, кэш, fallback, и round-robin.
+    """
+    ip_list = get_ip_for_domain(domain)
+    ttl = get_ttl_for_domain(domain)
+
+    cfg = get_domain_config(domain)
+    policy = cfg.get("server", {}).get("policy", "any")
+
+    if policy == "any" and len(ip_list) > 1:
+        idx = _rr_counters.setdefault(domain, 0)
+        ip_list = ip_list[idx:] + ip_list[:idx]
+        _rr_counters[domain] = (idx + 1) % len(ip_list)
+
+    return ip_list, ttl
