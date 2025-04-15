@@ -78,28 +78,28 @@ def load_config(path: str) -> dict:
             # Валидация конфигурации домена
             validate_domain_config(domain, domain_cfg)
 
-    # Проверка совместимости потоков DNS и API
-    dns_threads = config['dns'].get('threads', 1)
-    api_enabled = config['api'].get('enabled', True)
-    
-    if dns_threads > 1 and api_enabled:
-        raise ConfigValidationError(
-            "Multi-threaded DNS server requires API to be disabled "
-            "(set api.enabled: false)"
-        )
+    # Удалена проверка совместимости потоков DNS и API, т.к. DNS сервер однопоточный
+    # dns_threads = config['dns'].get('threads', 1)
+    # api_enabled = config['api'].get('enabled', True)
+    #
+    # if dns_threads > 1 and api_enabled:
+    #     raise ConfigValidationError(
+    #         "Multi-threaded DNS server requires API to be disabled "
+    #         "(set api.enabled: false)"
+    #     )
 
     # Установка значений по умолчанию
     config['dns'].setdefault('resolve_cache_ttl', 5)
-    config['dns'].setdefault('threads', 1)
-    config['api'].setdefault('enabled', True)
+    # config['dns'].setdefault('threads', 1) # Этот параметр не используется
+    config['api'].setdefault('enabled', True) # Параметр 'enabled' не используется в main.py, но оставим для ясности
 
-    log.info(f"Loaded valid config from {config_path}")
+    log.info(f"Loaded valid config from {path}") # Исправлено: config_path -> path
     return config
 
 def validate_domain_config(domain: str, domain_cfg: dict):
     """Валидация конфигурации отдельного домена"""
     required_sections = ['server', 'monitor', 'fallback']
-    
+
     for section in required_sections:
         if section not in domain_cfg:
             raise ConfigValidationError(
@@ -108,17 +108,27 @@ def validate_domain_config(domain: str, domain_cfg: dict):
 
     # Валидация серверных настроек
     server_cfg = domain_cfg['server']
-    if server_cfg.get('policy', 'any') not in ['any', 'priority']:
-        raise ConfigValidationError(
-            f"Invalid server policy for {domain}: {server_cfg['policy']}"
+    # Добавим 'all' и 'quorum' как возможные, но пока не реализованные
+    valid_policies = ['any', 'priority', 'quorum', 'all']
+    if server_cfg.get('policy', 'any') not in valid_policies:
+        log.warning(f"Policy {server_cfg['policy']} for domain {domain} is not fully supported yet.")
+        # Пока не будем падать, разрешим использовать 'any' или 'priority'
+        if server_cfg.get('policy', 'any') not in ['any', 'priority']:
+            raise ConfigValidationError(
+            f"Invalid or unsupported server policy for {domain}: {server_cfg['policy']}. Supported: any, priority"
         )
+
 
     # Валидация мониторинга
     monitor_cfg = domain_cfg['monitor']
-    if monitor_cfg.get('mode', 'tcp') not in ['tcp', 'http', 'icmp']:
-        raise ConfigValidationError(
-            f"Invalid monitor mode for {domain}: {monitor_cfg['mode']}"
-        )
+    # Добавим http, icmp как возможные, но пока не реализованные агентом
+    valid_modes = ['tcp', 'http', 'icmp']
+    if monitor_cfg.get('mode', 'tcp') not in valid_modes:
+        log.warning(f"Monitor mode {monitor_cfg['mode']} for domain {domain} might not be supported by agents yet.")
+        # Пока не будем падать, но предупредим
+        # raise ConfigValidationError(
+        #    f"Invalid monitor mode for {domain}: {monitor_cfg['mode']}"
+        # )
 
     # Проверка целей мониторинга
     targets = monitor_cfg.get('targets', [])
@@ -128,17 +138,35 @@ def validate_domain_config(domain: str, domain_cfg: dict):
         )
 
     for target in targets:
-        if 'ip' not in target or 'port' not in target:
+        # Порт не обязателен для ICMP
+        if 'ip' not in target:
             raise ConfigValidationError(
-                f"Invalid target configuration in {domain}: {target}"
+                f"Invalid target configuration in {domain} (missing ip): {target}"
             )
+        if monitor_cfg.get('mode', 'tcp') != 'icmp' and 'port' not in target:
+            raise ConfigValidationError(
+                f"Invalid target configuration in {domain} (missing port for non-ICMP check): {target}"
+            )
+        # Проверка IP адреса в таргете
+        try:
+            ipaddress.ip_address(target['ip'])
+        except ValueError:
+            raise ConfigValidationError(
+                f"Invalid target IP in {domain}: {target['ip']}"
+            )
+
 
     # Валидация fallback IP
     fallback = domain_cfg['fallback']
-    if not isinstance(fallback, list) or len(fallback) == 0:
+    if not isinstance(fallback, list): # Пустой список разрешен, если не хотим fallback
         raise ConfigValidationError(
-            f"Domain {domain} must have non-empty fallback list"
+            f"Fallback for domain {domain} must be a list"
         )
+    # Убираем проверку на len > 0, пустой fallback может быть легитимным
+    # if len(fallback) == 0:
+    #     raise ConfigValidationError(
+    #         f"Domain {domain} must have non-empty fallback list"
+    #     )
 
     for ip in fallback:
         try:
