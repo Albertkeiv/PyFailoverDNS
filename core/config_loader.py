@@ -15,10 +15,10 @@ def load_config(path: str) -> dict:
     Загружает и валидирует конфигурационный файл YAML
     Возвращает нормализованный конфиг словарем
     """
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found: {config_path}")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Config file not found: {path}")
 
-    with open(config_path, 'r') as f:
+    with open(path, 'r') as f:
         try:
             config = yaml.safe_load(f)
         except yaml.YAMLError as e:
