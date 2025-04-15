@@ -249,21 +249,21 @@ log_logic = logging.getLogger("LOGIC")
 
 def get_domain_config(domain: str) -> dict:
     """Возвращает конфигурацию домена с атомарным доступом к state"""
-    def process_callback(s):
-        config = s.get("config", {})
+    with state_lock:
+        config = state.get("config", {})
         for zone in config.get("zones", []):
             if domain in zone.get("domains", {}):
                 return zone["domains"][domain].copy()
         return {}
-    return atomic_state_update(process_callback)
 
 def get_ttl_for_domain(domain: str) -> int:
     """Возвращает TTL для домена из конфигурации или state"""
-    def process_callback(s):
+    with state_lock:
         domain_cfg = get_domain_config(domain)
-        ttl = domain_cfg.get("server", {}).get("resolve_cache_ttl") or s.get("config", {}).get("dns", {}).get("resolve_cache_ttl", 5)
-        return ttl
-    return atomic_state_update(process_callback)
+        return (
+            domain_cfg.get("server", {}).get("resolve_cache_ttl")
+            or state.get("config", {}).get("dns", {}).get("resolve_cache_ttl", 5)
+        )
 
 def sort_ips_by_policy(ips: List[str], domain_cfg: dict, policy: str) -> List[str]:
     """Сортирует IP согласно заданной политике"""
@@ -285,35 +285,34 @@ def sort_ips_by_policy(ips: List[str], domain_cfg: dict, policy: str) -> List[st
 
 def get_fallback_list(domain: str, domain_cfg: Optional[dict] = None) -> List[str]:
     """Возвращает fallback IP список с валидацией"""
-    def process_callback(s):
-        effective_domain_cfg = domain_cfg
-        if not effective_domain_cfg:
-            _cfg = get_domain_config(domain)
-            if not _cfg:
-                log_logic.error(f"Cannot get domain config for {domain} to determine fallback IPs.")
-                return ["127.0.0.1"]
-            effective_domain_cfg = _cfg
-        fallback = effective_domain_cfg.get("fallback", [])
-        if not isinstance(fallback, list):
-            log_logic.error(f"Invalid fallback configuration for {domain} (not a list), using default.")
+    if not domain_cfg:
+        domain_cfg = get_domain_config(domain)
+        if not domain_cfg:
+            log_logic.error(f"Cannot get domain config for {domain} to determine fallback IPs.")
             return ["127.0.0.1"]
-        if not fallback:
-            log_logic.warning(f"Fallback list is empty for domain {domain}. No fallback IPs available.")
-            return []
-        valid_ips = []
-        for ip in fallback:
-            try:
-                ipaddress.ip_address(ip)
-                valid_ips.append(ip)
-            except ValueError:
-                log_logic.warning(f"Invalid fallback IP format '{ip}' for domain {domain}")
-        if not valid_ips and fallback:
-            log_logic.error(f"All configured fallback IPs for {domain} are invalid. Returning default.")
-            return ["127.0.0.1"]
-        elif not valid_ips and not fallback:
-            return []
-        return valid_ips
-    return atomic_state_update(process_callback)
+
+    fallback = domain_cfg.get("fallback", [])
+    if not isinstance(fallback, list):
+        log_logic.error(f"Invalid fallback configuration for {domain} (not a list), using default.")
+        return ["127.0.0.1"]
+    if not fallback:
+        log_logic.warning(f"Fallback list is empty for domain {domain}. No fallback IPs available.")
+        return []
+
+    valid_ips = []
+    for ip in fallback:
+        try:
+            ipaddress.ip_address(ip)
+            valid_ips.append(ip)
+        except ValueError:
+            log_logic.warning(f"Invalid fallback IP format '{ip}' for domain {domain}")
+
+    if not valid_ips and fallback:
+        log_logic.error(f"All configured fallback IPs for {domain} are invalid. Returning default.")
+        return ["127.0.0.1"]
+    elif not valid_ips and not fallback:
+        return []
+    return valid_ips
 
 def apply_rr_policy(ip_list: List[str], domain: str, current_state: dict) -> List[str]:
     """Применяет round-robin балансировку к списку IP"""
@@ -326,17 +325,18 @@ def apply_rr_policy(ip_list: List[str], domain: str, current_state: dict) -> Lis
 
 def get_alive_ips(domain: str) -> List[str]:
     """Возвращает список живых IP с учетом политик и fallback"""
-    def process_callback(s):
+    with state_lock:
         domain_cfg = get_domain_config(domain)
         if not domain_cfg:
             log_logic.warning(f"get_alive_ips called for non-configured domain: {domain}")
             return []
-        checks = s.get("checks", {}).get(domain, {})
+        checks = state.get("checks", {}).get(domain, {})
         timeout_sec = domain_cfg.get("server", {}).get("timeout_sec", 60)
         policy = domain_cfg.get("server", {}).get("policy", "any")
         now = datetime.now(timezone.utc)
         valid_hosts = []
         configured_targets = {t['ip'] for t in domain_cfg.get("monitor", {}).get("targets", []) if 'ip' in t}
+
         for ip, agents in checks.items():
             if ip not in configured_targets:
                 continue
@@ -347,9 +347,10 @@ def get_alive_ips(domain: str) -> List[str]:
                     log_logic.warning(f"Invalid timestamp type for agent {agent_id} check on {ip}: {type(ts)}")
                     continue
                 time_diff = now - ts
-                if time_diff.total_seconds() >= 0 and time_diff.total_seconds() <= timeout_sec and status == "ok":
+                if 0 <= time_diff.total_seconds() <= timeout_sec and status == "ok":
                     valid_hosts.append(ip)
                     break
+
         unique_valid_hosts = sorted(list(set(valid_hosts)))
         if not unique_valid_hosts:
             log_logic.warning(f"No live IPs found for {domain} within timeout {timeout_sec}s. Using fallback.")
@@ -357,77 +358,102 @@ def get_alive_ips(domain: str) -> List[str]:
         else:
             log_logic.info(f"Live IPs found for {domain}: {unique_valid_hosts}. Applying policy '{policy}'.")
             return sort_ips_by_policy(unique_valid_hosts, domain_cfg, policy)
-    return atomic_state_update(process_callback)
 
-def get_dns_response(domain: str) -> Tuple[List[str], int]:
-    """Генерирует DNS ответ (список IP и TTL) с учетом кеша и политик"""
-    def process_callback(s):
+def get_dns_response(domain: str) -> Tuple[List[str], int, bool]:
+    """
+    Генерирует DNS-ответ (список IP, TTL и флаг fallback) с учётом кеша и политик.
+    Возвращает кортеж (ip_list, ttl, is_fallback).
+    """
+    with state_lock:
         domain_cfg = get_domain_config(domain)
         if not domain_cfg:
             log_logic.debug(f"DNS query for non-configured domain: {domain}")
-            default_ttl = s.get("config", {}).get("dns", {}).get("resolve_cache_ttl", 5)
-            return [], default_ttl
+            default_ttl = state.get("config", {}).get("dns", {}).get("resolve_cache_ttl", 5)
+            return [], default_ttl, False
+
         cache_key = domain
-        resolved_cache = s.setdefault("resolved", {})
+        resolved_cache = state.setdefault("resolved", {})
         now = datetime.now(timezone.utc)
         base_ttl = get_ttl_for_domain(domain)
+
+        # Проверяем кэш
         if cache_key in resolved_cache:
             cached_entry = resolved_cache[cache_key]
             cache_timestamp = cached_entry.get("timestamp")
             cached_ttl = cached_entry.get("ttl", base_ttl)
             if isinstance(cache_timestamp, datetime):
                 cache_age = (now - cache_timestamp).total_seconds()
-                if cache_age >= 0 and cache_age <= cached_ttl:
+                if 0 <= cache_age <= cached_ttl:
                     remaining_ttl = max(0, int(cached_ttl - cache_age))
-                    log_logic.debug(f"[CACHE HIT] {domain} -> {cached_entry['ips']} (TTL remaining: {remaining_ttl}s)")
-                    return apply_rr_policy(cached_entry['ips'], domain, s), remaining_ttl
+                    ip_list = apply_rr_policy(cached_entry['ips'], domain, state)
+                    log_logic.debug(
+                        f"[CACHE HIT] {domain} -> {cached_entry['ips']} "
+                        f"(TTL remaining: {remaining_ttl}s, Fallback: {cached_entry.get('is_fallback')})"
+                    )
+                    return ip_list, remaining_ttl, cached_entry.get('is_fallback', False)
                 else:
                     log_logic.debug(f"[CACHE EXPIRED] {domain} (Age: {cache_age:.1f}s > TTL: {cached_ttl}s)")
             else:
                 log_logic.warning(f"Invalid timestamp in cache for {domain}. Ignoring cache entry.")
-                del s["resolved"][cache_key]
+            del resolved_cache[cache_key]
+
         log_logic.debug(f"[CACHE MISS] Resolving {domain}")
         ip_list = get_alive_ips(domain)
-        live_ips_exist = False
-        checks = s.get("checks", {}).get(domain, {})
+
+        # Проверяем, есть ли хотя бы один живой IP
+        checks = state.get("checks", {}).get(domain, {})
         timeout_sec = domain_cfg.get("server", {}).get("timeout_sec", 60)
+        live_ips_exist = False
+
         for ip, agents in checks.items():
             for agent_data in agents.values():
                 ts = agent_data.get("timestamp")
                 if isinstance(ts, datetime):
                     time_diff = now - ts
-                    if time_diff.total_seconds() >= 0 and time_diff.total_seconds() <= timeout_sec and agent_data.get("status") == "ok":
+                    if 0 <= time_diff.total_seconds() <= timeout_sec and agent_data.get("status") == "ok":
                         live_ips_exist = True
                         break
             if live_ips_exist:
                 break
+
         is_fallback = not live_ips_exist and bool(ip_list)
         final_ttl = domain_cfg.get("fallback_ttl", base_ttl) if is_fallback else base_ttl
+
         resolved_cache[cache_key] = {
             "ips": ip_list,
             "timestamp": now,
             "ttl": final_ttl,
             "is_fallback": is_fallback
         }
+
         log_logic.info(f"[RESOLVE] {domain} -> {ip_list} (TTL: {final_ttl}, Fallback: {is_fallback})")
-        return apply_rr_policy(ip_list, domain, s), final_ttl
-    return atomic_state_update(process_callback)
+        ip_list = apply_rr_policy(ip_list, domain, state)
+        return ip_list, final_ttl, is_fallback
 
 def update_status(report) -> None:
-    """Обновляет статус проверок на основе отчета от агента"""
-    def update_callback(s):
+    """Обновляет статус проверок на основе отчёта от агента"""
+    with state_lock:
         domain = report.domain
         host = report.target_ip
         agent = report.agent_id
         domain_cfg = get_domain_config(domain)
         if not domain_cfg:
-            log_logic.warning(f"Received status report from agent {agent} for non-configured domain {domain}. Ignoring.")
+            log_logic.warning(
+                f"Received status report from agent {agent} for non-configured domain {domain}. Ignoring."
+            )
             return
-        configured_targets = {t['ip'] for t in domain_cfg.get("monitor", {}).get("targets", []) if 'ip' in t}
+
+        configured_targets = {
+            t['ip'] for t in domain_cfg.get("monitor", {}).get("targets", []) if 'ip' in t
+        }
         if host not in configured_targets:
-            log_logic.warning(f"Received status report from agent {agent} for domain {domain} target IP {host} which is not configured in targets. Ignoring.")
+            log_logic.warning(
+                f"Received status report from agent {agent} for domain {domain} target IP {host} "
+                f"which is not configured in targets. Ignoring."
+            )
             return
-        domain_checks = s.setdefault("checks", {}).setdefault(domain, {})
+
+        domain_checks = state.setdefault("checks", {}).setdefault(domain, {})
         host_checks = domain_checks.setdefault(host, {})
         host_checks[agent] = {
             "status": report.status,
@@ -436,11 +462,13 @@ def update_status(report) -> None:
             "port": report.port,
             "reason": report.reason
         }
-        if domain in s.get("resolved", {}):
+
+        # Сбрасываем кэш, чтобы актуализировать IP
+        if domain in state.get("resolved", {}):
             log_logic.debug(f"Clearing DNS cache for {domain} due to new report from {agent}")
-            del s["resolved"][domain]
+            del state["resolved"][domain]
+
         log_logic.info(f"Status updated by {agent} for {domain} -> {host}:{report.port} = {report.status}")
-    atomic_state_update(update_callback)
 
 def _update_agent_status_summary(agents_summary: dict, agent_id: str, ip: str, ts: datetime) -> None:
     if agent_id not in agents_summary:
@@ -461,6 +489,7 @@ def _build_domain_status(domain: str, cfg: dict, checks: dict, now: datetime) ->
     latest_ts = None
     domain_checks = checks.get(domain, {})
     configured_targets = {t['ip'] for t in cfg.get("monitor", {}).get("targets", []) if 'ip' in t}
+
     for ip, agents_reports in domain_checks.items():
         if ip not in configured_targets:
             continue
@@ -471,9 +500,10 @@ def _build_domain_status(domain: str, cfg: dict, checks: dict, now: datetime) ->
                 _update_agent_status_summary(agents_summary, agent_id, ip, ts)
                 latest_ts = max(latest_ts, ts) if latest_ts else ts
                 time_diff = now - ts
-                if not ip_is_live and time_diff.total_seconds() >= 0 and time_diff.total_seconds() <= timeout and data.get("status") == "ok":
+                if not ip_is_live and 0 <= time_diff.total_seconds() <= timeout and data.get("status") == "ok":
                     live_ips.add(ip)
                     ip_is_live = True
+
     status = {
         "domain": domain,
         "live_ips": sorted(list(live_ips)),
@@ -482,6 +512,7 @@ def _build_domain_status(domain: str, cfg: dict, checks: dict, now: datetime) ->
         "agents": [],
         "last_updated": latest_ts.isoformat() if latest_ts else None
     }
+
     agent_list = []
     for agent_id, summary in agents_summary.items():
         agent_list.append({
@@ -494,31 +525,34 @@ def _build_domain_status(domain: str, cfg: dict, checks: dict, now: datetime) ->
 
 def get_domain_status() -> List[dict]:
     """Генерирует статус всех доменов для API"""
-    def process_callback(s):
+    with state_lock:
         result = []
         now = datetime.now(timezone.utc)
-        config = s.get("config", {})
-        checks = s.get("checks", {})
+        config = state.get("config", {})
+        checks = state.get("checks", {})
+
         for zone in config.get("zones", []):
             for domain, cfg in zone.get("domains", {}).items():
                 result.append(_build_domain_status(domain, cfg, checks, now))
+
         return sorted(result, key=lambda d: d["domain"])
-    return atomic_state_update(process_callback)
 
 def _ip_has_live_checks(ip: str, ip_agents_reports: dict, timeout: int, now: datetime) -> bool:
     for agent_data in ip_agents_reports.values():
         ts = agent_data.get("timestamp")
         if isinstance(ts, datetime):
             time_diff = now - ts
-            if time_diff.total_seconds() >= 0 and time_diff.total_seconds() <= timeout and agent_data.get("status") == "ok":
+            if 0 <= time_diff.total_seconds() <= timeout and agent_data.get("status") == "ok":
                 return True
     return False
 
 def _build_ip_checks_details(checks: dict, cfg: dict, now: datetime) -> dict:
     timeout = cfg.get("server", {}).get("timeout_sec", 60)
     ip_checks_details = {}
-    domain_checks = checks.get(cfg["_domain_name_for_context_"], {})
+    domain_name = cfg.get("_domain_name_for_context_", "")
+    domain_checks = checks.get(domain_name, {})
     targets_map = {t['ip']: t for t in cfg.get("monitor", {}).get("targets", []) if 'ip' in t}
+
     for ip, agents_reports in domain_checks.items():
         if ip not in targets_map:
             continue
@@ -529,7 +563,7 @@ def _build_ip_checks_details(checks: dict, cfg: dict, now: datetime) -> dict:
             is_expired = True
             if isinstance(ts, datetime):
                 time_diff = now - ts
-                is_expired = not (time_diff.total_seconds() >= 0 and time_diff.total_seconds() <= timeout)
+                is_expired = not (0 <= time_diff.total_seconds() <= timeout)
                 if not is_expired and data.get("status") == "ok":
                     ip_is_live = True
             reports_list.append({
@@ -544,6 +578,8 @@ def _build_ip_checks_details(checks: dict, cfg: dict, now: datetime) -> dict:
             "port": targets_map[ip].get("port"),
             "agents": sorted(reports_list, key=lambda r: r["agent_id"])
         }
+
+    # Добавляем пустые записи для IP, по которым нет отчётов
     for target_ip, target_cfg in targets_map.items():
         if target_ip not in ip_checks_details:
             ip_checks_details[target_ip] = {
@@ -555,21 +591,27 @@ def _build_ip_checks_details(checks: dict, cfg: dict, now: datetime) -> dict:
 
 def get_domain_details(domain: str) -> dict:
     """Возвращает детальную информацию о домене для API"""
-    def process_callback(s):
+    with state_lock:
         cfg = get_domain_config(domain)
         if not cfg:
             raise KeyError(f"Domain '{domain}' not found in configuration")
-        checks = s.get("checks", {})
+
+        checks = state.get("checks", {})
         now = datetime.now(timezone.utc)
         timeout = cfg.get("server", {}).get("timeout_sec", 60)
         domain_is_live = False
         domain_checks = checks.get(domain, {})
+
         for ip, agents_reports in domain_checks.items():
             if _ip_has_live_checks(ip, agents_reports, timeout, now):
                 domain_is_live = True
                 break
+
+        # Вставляем служебное поле, чтобы _build_ip_checks_details «знал», чей конфиг обрабатывает
         cfg["_domain_name_for_context_"] = domain
         ip_checks_data = _build_ip_checks_details(checks, cfg, now)
+        del cfg["_domain_name_for_context_"]  # Убираем служебное поле
+
         return {
             "domain": domain,
             "check_type": cfg.get("monitor", {}).get("mode", "tcp"),
@@ -577,7 +619,6 @@ def get_domain_details(domain: str) -> dict:
             "fallback_ips": cfg.get("fallback", []),
             "ip_checks": ip_checks_data
         }
-    return atomic_state_update(process_callback)
 
 def _should_include_domain_for_task(domain_cfg: dict, agent_tags: List[str]) -> bool:
     monitor_cfg = domain_cfg.get("monitor", {})
@@ -598,6 +639,7 @@ def _create_tasks_for_domain(domain: str, domain_cfg: dict) -> List[dict]:
     monitor_cfg = domain_cfg.get("monitor", {})
     agent_cfg = domain_cfg.get("agent", {})
     check_mode = monitor_cfg.get("mode", "tcp")
+
     for target in monitor_cfg.get("targets", []):
         target_ip = target.get("ip")
         target_port = target.get("port") if check_mode != 'icmp' else None
@@ -617,12 +659,13 @@ def _create_tasks_for_domain(domain: str, domain_cfg: dict) -> List[dict]:
 
 def extract_monitor_tasks(agent_tags: List[str], agent_api_key: Optional[str]) -> List[dict]:
     """Генерирует задачи мониторинга для доменов, на которые у агента есть права"""
-    def process_callback(s):
+    with state_lock:
         tasks = []
-        config = s.get("config", {})
+        config = state.get("config", {})
         if not agent_tags:
             log_logic.warning("Agent requested tasks with no tags.")
             return []
+
         for zone in config.get("zones", []):
             for domain, domain_cfg in zone.get("domains", {}).items():
                 expected_token = domain_cfg.get("agent", {}).get("token")
@@ -631,9 +674,12 @@ def extract_monitor_tasks(agent_tags: List[str], agent_api_key: Optional[str]) -
                     continue
                 if _should_include_domain_for_task(domain_cfg, agent_tags):
                     tasks.extend(_create_tasks_for_domain(domain, domain_cfg))
-        log_logic.info(f"Extracted {len(tasks)} tasks for agent tags: {agent_tags} (Key provided: {'yes' if agent_api_key else 'no'})")
+
+        log_logic.info(
+            f"Extracted {len(tasks)} tasks for agent tags: {agent_tags} "
+            f"(Key provided: {'yes' if agent_api_key else 'no'})"
+        )
         return sorted(tasks, key=lambda t: t["check_name"])
-    return atomic_state_update(process_callback)
 
 ###############################################################################
 # 5. Resolver (из resolver.py)
@@ -657,7 +703,7 @@ class FailoverResolver(BaseResolver):
             self.config.setdefault('dns', {}).setdefault('resolve_cache_ttl', 5)
             log_dns.warning("resolve_cache_ttl not found in DNS config, using default 5s")
 
-    def resolve(self, request, handler) -> RR:
+    def resolve(self, request, handler):
         qname = str(request.q.qname).rstrip('.')
         qtype = QTYPE[request.q.qtype]
         reply = request.reply()
@@ -667,7 +713,7 @@ class FailoverResolver(BaseResolver):
                 log_dns.debug(f"Domain not configured or handled by this server: {qname}")
                 return reply
             if qtype == "A":
-                self._process_a_record(qname, reply, domain_cfg)
+                self._process_a_record(qname, reply)
             else:
                 log_dns.warning(f"Unsupported query type: {qtype} for domain {qname}")
         except Exception as e:
@@ -675,32 +721,40 @@ class FailoverResolver(BaseResolver):
             return reply
         return reply
 
-    def _process_a_record(self, qname: str, reply: RR, domain_cfg: dict) -> None:
+    def _process_a_record(self, qname: str, reply):
         try:
-            ip_list, ttl = get_dns_response(qname)
+            ip_list, ttl, is_fallback = get_dns_response(qname)
         except Exception as e:
             log_dns.exception(f"Error resolving domain {qname} via core logic: {e}")
             ip_list = []
             ttl = self.config.get('dns', {}).get('resolve_cache_ttl', 5)
-        is_fallback = False
+            is_fallback = False
+
         if not ip_list:
             log_dns.warning(f"No IPs (live or fallback) available for domain {qname}")
             return
+
         valid_ips = self._validate_ips_format(ip_list, qname)
         if not valid_ips:
-            log_dns.error(f"IP list for {qname} received from logic contains invalid formats: {ip_list}. Not returning records.")
+            log_dns.error(
+                f"IP list for {qname} from logic contains invalid formats: {ip_list}. Not returning records."
+            )
             return
-        effective_ttl = ttl
+
+        if is_fallback:
+            log_dns.info(f"[DNS] {qname} is using fallback IPs: {valid_ips}")
+        else:
+            log_dns.info(f"[DNS] {qname} resolved to {valid_ips}")
+
         for ip in valid_ips:
             reply.add_answer(
                 RR(
                     qname,
                     QTYPE.A,
                     rdata=A(ip),
-                    ttl=effective_ttl
+                    ttl=ttl
                 )
             )
-        log_dns.info(f"Resolved {qname} -> {valid_ips} (TTL: {effective_ttl})")
 
     def _validate_ips_format(self, ips: List[str], domain: str) -> List[str]:
         valid_ips = []
@@ -743,9 +797,10 @@ class ThreadedDNSServer:
             log_dns.exception("Failed to initialize DNSServer components")
             self.server = None
             return
+
         if self.server:
             log_dns.debug("Starting DNS server thread...")
-            self.thread = threading.Thread(target=self._run_server, name="DNSServerThread", daemon=False)
+            self.thread = threading.Thread(target=self._run_server, name="DNSServerThread", daemon=True)
             self.thread.start()
             log_dns.info(f"DNS server thread '{self.thread.name}' started.")
         else:
@@ -768,8 +823,8 @@ class ThreadedDNSServer:
             log_dns.exception("DNS Server thread: An unexpected error occurred during server execution")
         finally:
             log_dns.info("DNS Server thread: Reached finally block.")
-            if self.server and self.server.is_running():
-                log_dns.warning("DNS Server thread: Server was still running in finally block, stopping it now.")
+            if self.server:
+                log_dns.warning("DNS Server thread: Attempting to stop server in finally block.")
                 try:
                     self.server.stop()
                 except Exception as stop_err:
@@ -780,17 +835,17 @@ class ThreadedDNSServer:
         listen_ip = self.config['dns']['listen_ip']
         listen_port = self.config['dns']['listen_port']
         log_dns.info(f"Stop requested for DNS server on {listen_ip}:{listen_port}")
-        if self.server and self.server.is_running():
-            log_dns.info("DNS server is running, attempting to stop...")
+
+        if self.server:
+            log_dns.info("DNS server is about to stop...")
             try:
                 self.server.stop()
                 log_dns.info("DNSServer stop() method called.")
             except Exception as e:
                 log_dns.exception("Exception occurred while calling server.stop()")
-        elif self.server:
-            log_dns.info("DNS server object exists but is not running.")
         else:
             log_dns.info("DNS server object does not exist.")
+
         if self.thread and self.thread.is_alive():
             log_dns.info(f"Waiting for DNS server thread '{self.thread.name}' to join...")
             self.thread.join(timeout=5.0)
@@ -801,6 +856,7 @@ class ThreadedDNSServer:
         elif self.thread:
             log_dns.info(f"DNS server thread '{self.thread.name}' was already finished.")
         log_dns.info(f"DNS server stop sequence completed for {listen_ip}:{listen_port}.")
+
 
 def start_dns_server(config: dict) -> ThreadedDNSServer:
     server = ThreadedDNSServer(config)
@@ -870,24 +926,25 @@ async def receive_report(
                 detail="Domain not configured"
             )
         validate_api_key_for_domain(report.domain, x_api_key)
-        def update_callback(s):
-            if report.status not in ["ok", "fail"]:
-                log_api.warning(f"Invalid status '{report.status}' in report from {report.agent_id}")
-                return {"status": "error", "message": "Invalid status value"}
-            update_status(report)
-            log_api.debug(f"Report from {report.agent_id} for {report.domain} -> {report.target_ip} processed.")
-            return {"status": "ok"}
-        result = atomic_state_update(update_callback)
-        if result.get("status") == "error":
+
+        # Выполняем обновление статуса
+        if report.status not in ["ok", "fail"]:
+            log_api.warning(f"Invalid status '{report.status}' in report from {report.agent_id}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=result.get("message", "Invalid report data")
+                detail="Invalid status value"
             )
-        return result
+
+        update_status(report)
+        log_api.debug(f"Report from {report.agent_id} for {report.domain} -> {report.target_ip} processed.")
+        return {"status": "ok"}
+
     except HTTPException as he:
         raise he
     except Exception as e:
-        log_api.exception(f"Report processing failed unexpectedly for domain {report.domain} from agent {report.agent_id}")
+        log_api.exception(
+            f"Report processing failed unexpectedly for domain {report.domain} from agent {report.agent_id}"
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error during report processing"
@@ -906,15 +963,21 @@ async def get_tasks(
 ):
     if not x_api_key:
         log_api.warning("Agent requested tasks without providing an API key.")
+
     try:
         tag_list = [tag.strip() for tag in tags.split(",") if tag.strip()]
         if not tag_list:
             log_api.warning("Agent requested tasks with empty or invalid tags.")
             return {"tasks": []}
+
         tasks = extract_monitor_tasks(tag_list, x_api_key)
-        log_api.info(f"Returning {len(tasks)} tasks for agent with tags: {tag_list} (key provided: {'yes' if x_api_key else 'no'})")
+        log_api.info(
+            f"Returning {len(tasks)} tasks for agent with tags: {tag_list} "
+            f"(key provided: {'yes' if x_api_key else 'no'})"
+        )
         validated_tasks = [MonitorTask(**task) for task in tasks]
         return {"tasks": validated_tasks}
+
     except Exception as e:
         log_api.exception(f"Task retrieval failed unexpectedly for tags: {tags}")
         raise HTTPException(
@@ -1014,6 +1077,7 @@ def check_port(ip: str, port: int) -> bool:
     except socket.error:
         log.warning(f"TCP port {ip}:{port} seems to be in use.")
         tcp_free = False
+
     try:
         with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as s:
             s.bind((ip, port))
@@ -1021,37 +1085,47 @@ def check_port(ip: str, port: int) -> bool:
     except socket.error:
         log.warning(f"UDP port {ip}:{port} seems to be in use.")
         udp_free = False
+
     return tcp_free and udp_free
 
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True, help='Path to config.yaml')
     args = parser.parse_args()
+
     if not os.path.isfile(args.config):
         logging.error(f"Config file not found: {args.config}")
         sys.exit(1)
+
     dns_server_instance = None
+    e = None  # для отслеживания исключений
+
     try:
         log.info(f"Loading configuration from: {args.config}")
         config = load_config(args.config)
         init_state(config)
         log.info("Configuration loaded and state initialized.")
+
         dns_cfg = config["dns"]
         dns_ip = dns_cfg["listen_ip"]
         dns_port = dns_cfg["listen_port"]
+
         log.info(f"Checking if DNS port {dns_ip}:{dns_port} is free...")
         if not check_port(dns_ip, dns_port):
             log.error(f"DNS port {dns_ip}:{dns_port} is already in use or cannot be bound. Exiting.")
             sys.exit(1)
         log.info(f"DNS port {dns_ip}:{dns_port} appears to be free.")
+
         log.info("Starting DNS server...")
         dns_server_instance = start_dns_server(config)
         await asyncio.sleep(1)
         log.info("DNS server start initiated.")
+
         api_cfg = config["api"]
         api_ip = api_cfg["listen_ip"]
         api_port = api_cfg["listen_port"]
         log.info(f"Starting API server on {api_ip}:{api_port}...")
+
         server = uvicorn.Server(
             uvicorn.Config(
                 app,
@@ -1064,9 +1138,12 @@ async def main():
         log.info("Running Uvicorn server...")
         await server.serve()
         log.info("Uvicorn server has stopped.")
-    except SystemExit as e:
+
+    except SystemExit as ex:
+        e = ex
         log.error(f"System exit requested with code {e.code}.")
-    except Exception as e:
+    except Exception as ex:
+        e = ex
         log.exception("Critical error during application lifecycle")
     finally:
         log.info("Shutting down application...")
@@ -1076,10 +1153,13 @@ async def main():
         else:
             log.info("No active DNS server instance to stop.")
         log.info("Application shutdown complete.")
-        if 'e' in locals() and isinstance(e, SystemExit):
-            sys.exit(e.code)
-        elif 'e' in locals() and isinstance(e, Exception):
-            sys.exit(1)
+
+        # Логика выхода из приложения
+        if e is not None:
+            if isinstance(e, SystemExit):
+                sys.exit(e.code)
+            else:
+                sys.exit(1)
         else:
             sys.exit(0)
 
@@ -1088,5 +1168,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         log.info("KeyboardInterrupt received (likely handled in main).")
-    except Exception as e:
-        logging.exception(f"Unexpected error at the top level: {e}")
+    except Exception as ex:
+        logging.exception(f"Unexpected error at the top level: {ex}")
