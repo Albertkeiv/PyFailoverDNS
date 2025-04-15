@@ -58,7 +58,7 @@ async def main():
         sys.exit(1)
 
     init_state(config)
-    start_dns_server(config)
+    dns_server = start_dns_server(config)
 
     api_cfg = config["api"]
     uvicorn_config = uvicorn.Config(api_app, host=api_cfg["listen_ip"], port=api_cfg["listen_port"], log_level="debug")
@@ -70,7 +70,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("Завершение по Ctrl+C")
-    except asyncio.CancelledError:
-        logging.info("Асинхронные задачи были отменены")
-    except Exception as e:
-        logging.exception(f"Неожиданная ошибка при завершении: {e}")

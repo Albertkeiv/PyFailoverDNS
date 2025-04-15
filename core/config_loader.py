@@ -10,7 +10,7 @@ log = logging.getLogger("CONFIG")
 class ConfigValidationError(ValueError):
     pass
 
-def load_config(config_path: str) -> Dict[str, Any]:
+def load_config(path: str) -> dict:
     """
     Загружает и валидирует конфигурационный файл YAML
     Возвращает нормализованный конфиг словарем

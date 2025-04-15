@@ -8,8 +8,8 @@ import threading
 logger = logging.getLogger("DNS")
 
 class ThreadedDNSServer:
-    def __init__(self, config_path: str):
-        self.config = load_config(config_path)
+    def __init__(self, config: dict):  # Принимаем готовый конфиг
+        self.config = config
         self.server = None
         self.thread = None
 
@@ -41,8 +41,7 @@ class ThreadedDNSServer:
             self.thread.join()
             logger.info("DNS server stopped")
 
-def start_dns_server(config_path: str) -> ThreadedDNSServer:
-    """Фабричная функция для создания и запуска сервера"""
-    server = ThreadedDNSServer(config_path)
+def start_dns_server(config: dict) -> ThreadedDNSServer:  # Принимаем dict вместо str
+    server = ThreadedDNSServer(config)
     server.start()
     return server
