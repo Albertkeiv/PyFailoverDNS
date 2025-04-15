@@ -1,10 +1,12 @@
-from core.state import state
+from core.state import state, state_lock
 from datetime import datetime, timezone
+from threading import local
 import logging
 import random
 
 _rr_counters = {}
 log = logging.getLogger("CACHE")
+_thread_local = local()
 
 def get_ip_for_domain(domain: str) -> list[str]:
     cached = state["resolved"].get(domain)
@@ -57,7 +59,8 @@ def get_domain_config(domain: str) -> dict:
     return {}
 
 def get_alive_ips(domain: str) -> list[str]:
-    checks = state["checks"].get(domain, {})
+    with state_lock:
+        checks = state["checks"].get(domain, {})
     if not checks:
         logging.warning(f"No checks recorded for domain: {domain}")
         return get_fallback_list(domain)
@@ -122,17 +125,16 @@ def update_status(report):
     host = report.target_ip
     agent = report.agent_id
 
-    checks = state.setdefault("checks", {}).setdefault(domain, {}).setdefault(host, {})
-    checks[agent] = {
-        "status": report.status,
-        "timestamp": report.timestamp,
-        "latency_ms": report.latency_ms
-    }
+    with state_lock:
+        checks = state.setdefault("checks", {}).setdefault(domain, {}).setdefault(host, {})
+        checks[agent] = {
+            "status": report.status,
+            "timestamp": report.timestamp,
+            "latency_ms": report.latency_ms
+        }
 
-    log.info(f"Received status from {agent} for {domain} → {host}: {report.status}")
-
-    if domain in state.get("resolved", {}):
-        del state["resolved"][domain]
+        if domain in state.get("resolved", {}):
+            del state["resolved"][domain]
 
 def using_fallback(ip_list: list[str], domain: str) -> bool:
     cfg = get_domain_config(domain)
@@ -298,8 +300,11 @@ def get_dns_response(domain: str) -> tuple[list[str], int]:
     policy = cfg.get("server", {}).get("policy", "any")
 
     if policy == "any" and len(ip_list) > 1:
-        idx = _rr_counters.setdefault(domain, 0)
+        if not hasattr(_thread_local, 'rr_counters'):
+            _thread_local.rr_counters = {}
+        
+        idx = _thread_local.rr_counters.get(domain, 0)
         ip_list = ip_list[idx:] + ip_list[:idx]
-        _rr_counters[domain] = (idx + 1) % len(ip_list)
+        _thread_local.rr_counters[domain] = (idx + 1) % len(ip_list)
 
     return ip_list, ttl

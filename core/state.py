@@ -1,14 +1,23 @@
 from datetime import datetime
+import threading
 import logging
 
 log = logging.getLogger("STATE")
 
+# Добавляем рекурсивный Lock
+state_lock = threading.RLock()
+
 state = {
     "config": None,
     "agents": {},
-    "checks": {},  # {domain: {ip: {agent_id: {...}}}}
-    "resolved": {}  # {domain: {"ip": str, "timestamp": datetime}}
+    "checks": {},
+    "resolved": {}
 }
 
 def init_state(config):
-    state["config"] = config
+    with state_lock:
+        state["config"] = config
+
+def atomic_state_update(callback):
+    with state_lock:
+        return callback(state)

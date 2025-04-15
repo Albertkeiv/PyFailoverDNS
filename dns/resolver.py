@@ -1,6 +1,7 @@
 from dnslib.server import BaseResolver
 from dnslib import RR, A, QTYPE
 from core.logic import get_dns_response
+from core.state import state_lock
 import logging
 
 log = logging.getLogger("DNS")
@@ -11,6 +12,8 @@ class FailoverResolver(BaseResolver):
 
     def resolve(self, request, handler):
         qname = str(request.q.qname).rstrip(".")
+        with state_lock:
+            ip_list, ttl = get_dns_response(qname)
         qtype = QTYPE[request.q.qtype]
         reply = request.reply()
 

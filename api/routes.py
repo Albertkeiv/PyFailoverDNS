@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request, Query, HTTPException, Header
 from typing import List
 from core.logic import update_status, extract_monitor_tasks, get_domain_status, get_domain_details, get_domain_config
 from api.models import ReportModel
-from core.state import state
+from core.state import state_lock
 from fastapi.responses import JSONResponse
 import logging
 
@@ -54,7 +54,9 @@ async def get_tasks(
 
 @app.get("/api/v1/status")
 async def status_summary():
-    return JSONResponse(content={"status": get_domain_status()})
+    with state_lock:
+        status = get_domain_status()
+    return JSONResponse(content={"status": status})
 
 @app.get("/api/v1/status/{domain}")
 async def status_domain(domain: str):
