@@ -1,310 +1,291 @@
-from core.state import state, state_lock
+from core.state import state, state_lock, atomic_state_update
 from datetime import datetime, timezone
-from threading import local
 import logging
 import random
+import heapq
+from typing import List, Tuple, Dict, Optional
+import ipaddress
 
-_rr_counters = {}
-log = logging.getLogger("CACHE")
-_thread_local = local()
+logger = logging.getLogger("LOGIC")
 
-def get_ip_for_domain(domain: str) -> list[str]:
-    cached = state["resolved"].get(domain)
-    ttl = get_ttl_for_domain(domain)
-    now = datetime.now(timezone.utc)
+def update_status(report) -> None:
+    """Обновляет статус проверок с блокировкой состояния"""
+    def update_callback(s):
+        domain = report.domain
+        host = report.target_ip
+        agent = report.agent_id
 
-    domain_cfg = get_domain_config(domain)
-    policy = domain_cfg.get("server", {}).get("policy", "any")
-
-    if cached:
-        age = (now - cached["timestamp"]).total_seconds()
-        if age <= ttl:
-            logging.debug(f"[CACHE HIT] Domain: {domain}, IPs: {cached['ips']}")
-            if policy == "priority" and is_priority_mode(domain_cfg) and not using_fallback(cached["ips"], domain):
-                return [cached["ips"][0]]
-            return cached["ips"]
-
-    ip_list = get_alive_ips(domain)
-    fallback_used = using_fallback(ip_list, domain)
-
-    state["resolved"][domain] = {
-        "ips": ip_list,
-        "timestamp": now
-    }
-
-    logging.debug(f"[CACHE SET] Domain: {domain}, IPs: {ip_list}")
-    if policy == "priority" and is_priority_mode(domain_cfg) and not fallback_used:
-        return [ip_list[0]]
-    return ip_list
-
-def is_priority_mode(domain_cfg: dict) -> bool:
-    """
-    Определяет, активна ли логика приоритетов:
-    - если policy указана как 'priority'
-    - и хотя бы один target содержит непустой priority
-    """
-    if domain_cfg.get("server", {}).get("policy") != "priority":
-        return False
-
-    targets = domain_cfg.get("monitor", {}).get("targets", [])
-    log.debug(f"[DEBUG is_priority_mode] Targets: {targets}")
-    return any("priority" in t and t["priority"] is not None for t in targets)
-
-
-def get_domain_config(domain: str) -> dict:
-    for zone in state["config"].get("zones", []):
-        domains = zone.get("domains", {})
-        if domain in domains:
-            return domains[domain]
-    return {}
-
-def get_alive_ips(domain: str) -> list[str]:
-    with state_lock:
-        checks = state["checks"].get(domain, {})
-    if not checks:
-        logging.warning(f"No checks recorded for domain: {domain}")
-        return get_fallback_list(domain)
-
-    domain_cfg = get_domain_config(domain)
-    timeout_sec = domain_cfg.get("server", {}).get("timeout_sec", 60)
-    policy = domain_cfg.get("server", {}).get("policy", "any")
-
-    now = datetime.now(timezone.utc)
-    valid_hosts = []
-
-    for ip, agents in checks.items():
-        for agent_id, data in agents.items():
-            ts = data["timestamp"]
-            if (now - ts).total_seconds() <= timeout_sec and data["status"] == "ok":
-                valid_hosts.append(ip)
-                break
-
-    if not valid_hosts:
-        logging.warning(f"All checks for {domain} are expired or failed")
-        return get_fallback_list(domain)
-
-    if policy == "priority":
-        targets = domain_cfg.get("monitor", {}).get("targets", [])
-        has_priorities = any("priority" in t for t in targets)
-
-        if has_priorities:
-            ip_to_priority = {t["ip"]: t.get("priority", 1000) for t in targets}
-            valid_hosts.sort(key=lambda ip: ip_to_priority.get(ip, 1000))
-        else:
-            random.shuffle(valid_hosts)
-    else:
-        random.shuffle(valid_hosts)
-
-    return valid_hosts
-
-def get_fallback_list(domain: str) -> list[str]:
-    cfg = get_domain_config(domain)
-    fallback_list = cfg.get("fallback", [])
-    if isinstance(fallback_list, list) and fallback_list:
-        return fallback_list
-    return ["127.0.0.1"]
-
-def calculate_best_ip(domain: str) -> str:
-    ips = get_alive_ips(domain)
-    if ips:
-        return ips[0]
-    return get_fallback(domain)
-
-def get_fallback(domain: str) -> str:
-    cfg = get_domain_config(domain)
-    fallback_list = cfg.get("fallback", [])
-    if isinstance(fallback_list, list) and fallback_list:
-        return fallback_list[0]
-    return "127.0.0.1"
-
-def get_ttl_for_domain(domain: str) -> int:
-    return state["config"].get("dns", {}).get("resolve_cache_ttl", 5)
-
-def update_status(report):
-    domain = report.domain
-    host = report.target_ip
-    agent = report.agent_id
-
-    with state_lock:
-        checks = state.setdefault("checks", {}).setdefault(domain, {}).setdefault(host, {})
+        checks = s.setdefault("checks", {}).setdefault(domain, {}).setdefault(host, {})
         checks[agent] = {
             "status": report.status,
             "timestamp": report.timestamp,
             "latency_ms": report.latency_ms
         }
 
-        if domain in state.get("resolved", {}):
-            del state["resolved"][domain]
+        if domain in s.get("resolved", {}):
+            del s["resolved"][domain]
 
-def using_fallback(ip_list: list[str], domain: str) -> bool:
-    cfg = get_domain_config(domain)
-    fallback = cfg.get("fallback", [])
-    return ip_list == fallback or set(ip_list).issubset(set(fallback))
+        logger.info(f"Received status from {agent} for {domain} → {host}: {report.status}")
+    
+    atomic_state_update(update_callback)
 
-def get_domain_status() -> list[dict]:
-    now = datetime.now(timezone.utc)
-    result = []
+def get_domain_config(domain: str) -> dict:
+    """Возвращает конфигурацию домена с блокировкой чтения"""
+    with state_lock:
+        for zone in state.get("config", {}).get("zones", []):
+            if domain in zone.get("domains", {}):
+                return zone["domains"][domain]
+        return {}
 
-    for zone in state["config"].get("zones", []):
-        for domain, cfg in zone.get("domains", {}).items():
-            fallback = cfg.get("fallback", [])
-            timeout = cfg.get("server", {}).get("timeout_sec", 60)
+def get_alive_ips(domain: str) -> List[str]:
+    """Возвращает список живых IP с учетом политик и приоритетов"""
+    def process_callback(s):
+        checks = s.get("checks", {}).get(domain, {})
+        domain_cfg = get_domain_config(domain)
+        timeout_sec = domain_cfg.get("server", {}).get("timeout_sec", 60)
+        policy = domain_cfg.get("server", {}).get("policy", "any")
+        now = datetime.now(timezone.utc)
 
-            checks = state.get("checks", {}).get(domain, {})
-            live_ips = []
-            agent_map = {}
-            latest_ts = None
+        valid_hosts = []
+        for ip, agents in checks.items():
+            for agent_data in agents.values():
+                ts = agent_data["timestamp"]
+                if (now - ts).total_seconds() <= timeout_sec and agent_data["status"] == "ok":
+                    valid_hosts.append(ip)
+                    break
 
-            for ip, agents in checks.items():
-                for agent_id, data in agents.items():
-                    ts = data["timestamp"]
-                    if agent_id not in agent_map:
-                        agent_map[agent_id] = {
-                            "agent_id": agent_id,
-                            "last_seen": ts,
-                            "checked_ips": set([ip])
-                        }
-                    else:
-                        agent_map[agent_id]["checked_ips"].add(ip)
-                        if ts > agent_map[agent_id]["last_seen"]:
-                            agent_map[agent_id]["last_seen"] = ts
+        if not valid_hosts:
+            logger.warning(f"All checks for {domain} are expired or failed")
+            return get_fallback_list(domain, domain_cfg)
 
-                    if (now - ts).total_seconds() <= timeout and data["status"] == "ok":
-                        live_ips.append(ip)
+        return sort_ips_by_policy(valid_hosts, domain_cfg, policy)
+    
+    return atomic_state_update(process_callback)
 
-                    if latest_ts is None or ts > latest_ts:
-                        latest_ts = ts
+def sort_ips_by_policy(ips: List[str], domain_cfg: dict, policy: str) -> List[str]:
+    """Сортирует IP согласно выбранной политике"""
+    if policy == "priority":
+        targets = domain_cfg.get("monitor", {}).get("targets", [])
+        priorities = {t["ip"]: t.get("priority", 1000) for t in targets}
+        
+        # Сортировка с сохранением порядка одинаковых приоритетов
+        return sorted(ips, key=lambda ip: priorities.get(ip, 1000))
+    else:
+        random.shuffle(ips)
+        return ips
 
-            agent_list = []
-            for info in agent_map.values():
-                agent_list.append({
-                    "agent_id": info["agent_id"],
-                    "last_seen": info["last_seen"].isoformat(),
-                    "checked_ips": sorted(info["checked_ips"])
-                })
+def get_fallback_list(domain: str, domain_cfg: Optional[dict] = None) -> List[str]:
+    """Возвращает fallback IP список с валидацией"""
+    if not domain_cfg:
+        domain_cfg = get_domain_config(domain)
+    
+    fallback = domain_cfg.get("fallback", [])
+    if not isinstance(fallback, list) or len(fallback) == 0:
+        logger.error(f"Invalid fallback for {domain}, using default")
+        return ["127.0.0.1"]
+    
+    # Валидация IP адресов
+    valid_ips = []
+    for ip in fallback:
+        try:
+            ipaddress.ip_address(ip)
+            valid_ips.append(ip)
+        except ValueError:
+            logger.warning(f"Invalid fallback IP {ip} for domain {domain}")
+    
+    return valid_ips or ["127.0.0.1"]
 
-            result.append({
-                "domain": domain,
-                "live_ips": sorted(set(live_ips)),
-                "using_fallback": len(live_ips) == 0,
-                "fallback_ips": fallback,
-                "agents": agent_list,
-                "last_updated": latest_ts.isoformat() if latest_ts else None
-            })
+def get_dns_response(domain: str) -> Tuple[List[str], int]:
+    """Генерирует DNS ответ с учетом кеша и политик"""
+    def process_callback(s):
+        if domain in s.get("resolved", {}):
+            cached = s["resolved"][domain]
+            ttl = get_ttl_for_domain(domain)
+            now = datetime.now(timezone.utc)
+            
+            if (now - cached["timestamp"]).total_seconds() <= ttl:
+                logger.debug(f"[CACHE] {domain} → {cached['ips']}")
+                return apply_rr_policy(cached["ips"], domain)
 
-    return result
+        # Кеш устарел или отсутствует
+        ip_list = get_alive_ips(domain)
+        ttl = get_ttl_for_domain(domain)
+        
+        s["resolved"][domain] = {
+            "ips": ip_list,
+            "timestamp": datetime.now(timezone.utc)
+        }
+        
+        logger.info(f"[RESOLVE] {domain} → {ip_list}")
+        return apply_rr_policy(ip_list, domain), ttl
+    
+    return atomic_state_update(process_callback)
 
-def get_domain_details(domain: str) -> dict:
-    cfg = get_domain_config(domain)
-    targets = cfg.get("monitor", {}).get("targets", [])
-    ip_to_port = {target["ip"]: target["port"] for target in targets if "ip" in target and "port" in target}
-    fallback = cfg.get("fallback", [])
-    timeout = cfg.get("server", {}).get("timeout_sec", 60)
-    monitor_mode = cfg.get("monitor", {}).get("mode", "tcp")
+def apply_rr_policy(ip_list: List[str], domain: str) -> List[str]:
+    """Применяет round-robin балансировку"""
+    if len(ip_list) <= 1:
+        return ip_list
+    
+    with state_lock:
+        rr_idx = state.setdefault("rr_counters", {}).get(domain, 0)
+        state["rr_counters"][domain] = (rr_idx + 1) % len(ip_list)
+    
+    return ip_list[rr_idx:] + ip_list[:rr_idx]
 
-    now = datetime.now(timezone.utc)
+def get_ttl_for_domain(domain: str) -> int:
+    """Возвращает TTL для домена"""
+    with state_lock:
+        return state.get("config", {}).get("dns", {}).get("resolve_cache_ttl", 5)
+
+def get_domain_status() -> List[dict]:
+    """Генерирует статус всех доменов"""
+    def process_callback(s):
+        result = []
+        now = datetime.now(timezone.utc)
+        
+        for zone in s.get("config", {}).get("zones", []):
+            for domain, cfg in zone.get("domains", {}).items():
+                result.append(build_domain_status(domain, cfg, now))
+        
+        return result
+    
+    return atomic_state_update(process_callback)
+
+def build_domain_status(domain: str, cfg: dict, now: datetime) -> dict:
+    """Строит статус для одного домена"""
     checks = state.get("checks", {}).get(domain, {})
-
-    ip_status = {}
-
+    timeout = cfg.get("server", {}).get("timeout_sec", 60)
+    
+    status = {
+        "domain": domain,
+        "live_ips": [],
+        "using_fallback": False,
+        "fallback_ips": cfg.get("fallback", []),
+        "agents": [],
+        "last_updated": None
+    }
+    
+    # Анализ проверок
+    latest_ts = None
     for ip, agents in checks.items():
-        agent_reports = []
-        ip_ok = False
-
         for agent_id, data in agents.items():
             ts = data["timestamp"]
-            age = (now - ts).total_seconds()
-            alive = age <= timeout
+            if (now - ts).total_seconds() <= timeout and data["status"] == "ok":
+                status["live_ips"].append(ip)
+            
+            update_agent_status(status["agents"], agent_id, ip, ts)
+            latest_ts = max(latest_ts, ts) if latest_ts else ts
+    
+    status["live_ips"] = sorted(set(status["live_ips"]))
+    status["using_fallback"] = len(status["live_ips"]) == 0
+    status["last_updated"] = latest_ts.isoformat() if latest_ts else None
+    
+    return status
 
-            agent_reports.append({
+def update_agent_status(agents: list, agent_id: str, ip: str, ts: datetime) -> None:
+    """Обновляет информацию об агентах"""
+    existing = next((a for a in agents if a["agent_id"] == agent_id), None)
+    if existing:
+        existing["checked_ips"].append(ip)
+        if ts > existing["last_seen"]:
+            existing["last_seen"] = ts
+    else:
+        agents.append({
+            "agent_id": agent_id,
+            "last_seen": ts,
+            "checked_ips": [ip]
+        })
+
+def get_domain_details(domain: str) -> dict:
+    """Возвращает детальную информацию о домене"""
+    def process_callback(s):
+        cfg = get_domain_config(domain)
+        checks = s.get("checks", {}).get(domain, {})
+        now = datetime.now(timezone.utc)
+        
+        return {
+            "domain": domain,
+            "check_type": cfg.get("monitor", {}).get("mode", "tcp"),
+            "live": any(ip_has_live_checks(ip, checks, cfg, now) for ip in checks),
+            "fallback_ips": cfg.get("fallback", []),
+            "ip_checks": build_ip_checks(checks, cfg, now)
+        }
+    
+    return atomic_state_update(process_callback)
+
+def ip_has_live_checks(ip: str, checks: dict, cfg: dict, now: datetime) -> bool:
+    """Проверяет есть ли живые проверки для IP"""
+    timeout = cfg.get("server", {}).get("timeout_sec", 60)
+    return any(
+        (now - data["timestamp"]).total_seconds() <= timeout
+        and data["status"] == "ok"
+        for agent_data in checks.get(ip, {}).values()
+    )
+
+def build_ip_checks(checks: dict, cfg: dict, now: datetime) -> dict:
+    """Формирует информацию о проверках IP"""
+    timeout = cfg.get("server", {}).get("timeout_sec", 60)
+    ip_checks = {}
+    
+    for ip, agents in checks.items():
+        reports = []
+        for agent_id, data in agents.items():
+            reports.append({
                 "agent_id": agent_id,
                 "status": data["status"],
-                "timestamp": ts.isoformat(),
+                "timestamp": data["timestamp"].isoformat(),
                 "latency_ms": data.get("latency_ms"),
-                "expired": not alive
+                "expired": (now - data["timestamp"]).total_seconds() > timeout
             })
-
-            if alive and data["status"] == "ok":
-                ip_ok = True
-
-        ip_status[ip] = {
-            "status": "ok" if ip_ok else "fail",
-            "port": ip_to_port.get(ip),
-            "agents": agent_reports
-        }
-
-    has_live_ip = any(ipinfo["status"] == "ok" for ipinfo in ip_status.values())
-
-    return {
-        "domain": domain,
-        "check_type": monitor_mode,
-        "live": has_live_ip,
-        "fallback_ips": fallback,
-        "ip_checks": ip_status
-    }
-
-def extract_monitor_tasks(agent_tags: list[str]) -> list[dict]:
-    tasks = []
-    config = state.get("config", {})
-    zones = config.get("zones", [])
-
-    for zone in zones:
-        domains = zone.get("domains", {})
-        for domain, domain_cfg in domains.items():
-            monitor_cfg = domain_cfg.get("monitor", {})
-            agent_cfg = domain_cfg.get("agent", {})
-
-            monitor_tags = monitor_cfg.get("monitor_tag", "")
-            if isinstance(monitor_tags, str):
-                monitor_tags = monitor_tags.split()
-            elif not isinstance(monitor_tags, list):
-                continue
-
-            if not set(monitor_tags) & set(agent_tags):
-                continue
-
-            mode = monitor_cfg.get("mode", "tcp")
-            timeout = agent_cfg.get("timeout_sec", 10)
-            interval = agent_cfg.get("interval_sec", 30)
-            targets = monitor_cfg.get("targets", [])
-
-            for target in targets:
-                ip = target.get("ip")
-                port = target.get("port")
-                if not ip or not port:
-                    continue
-
-                check_name = f"{domain}:{ip}:{port}"
-
-                tasks.append({
-                    "check_name": check_name,
-                    "domain": domain,
-                    "target_ip": ip,
-                    "port": port,
-                    "type": mode,
-                    "timeout_sec": timeout,
-                    "interval_sec": interval
-                })
-
-    return tasks
-
-def get_dns_response(domain: str) -> tuple[list[str], int]:
-    """
-    Возвращает (список IP-адресов, TTL) для DNS-ответа по домену.
-    Учитывает политику, кэш, fallback, и round-robin.
-    """
-    ip_list = get_ip_for_domain(domain)
-    ttl = get_ttl_for_domain(domain)
-
-    cfg = get_domain_config(domain)
-    policy = cfg.get("server", {}).get("policy", "any")
-
-    if policy == "any" and len(ip_list) > 1:
-        if not hasattr(_thread_local, 'rr_counters'):
-            _thread_local.rr_counters = {}
         
-        idx = _thread_local.rr_counters.get(domain, 0)
-        ip_list = ip_list[idx:] + ip_list[:idx]
-        _thread_local.rr_counters[domain] = (idx + 1) % len(ip_list)
+        ip_checks[ip] = {
+            "status": "ok" if any(r["status"] == "ok" and not r["expired"] for r in reports) else "fail",
+            "port": next((t["port"] for t in cfg.get("monitor", {}).get("targets", []) 
+                        if t.get("ip") == ip), None),
+            "agents": reports
+        }
+    
+    return ip_checks
 
-    return ip_list, ttl
+def extract_monitor_tasks(agent_tags: List[str]) -> List[dict]:
+    """Генерирует задачи мониторинга на основе тегов агента"""
+    def process_callback(s):
+        tasks = []
+        config = s.get("config", {})
+        
+        for zone in config.get("zones", []):
+            for domain, domain_cfg in zone.get("domains", {}).items():
+                if should_include_domain(domain_cfg, agent_tags):
+                    tasks.extend(create_tasks_for_domain(domain, domain_cfg))
+        
+        return tasks
+    
+    return atomic_state_update(process_callback)
+
+def should_include_domain(domain_cfg: dict, agent_tags: List[str]) -> bool:
+    """Определяет должен ли домен быть включен в задачи"""
+    monitor_tags = domain_cfg.get("monitor", {}).get("monitor_tag", "")
+    if isinstance(monitor_tags, str):
+        monitor_tags = monitor_tags.split()
+    return bool(set(monitor_tags) & set(agent_tags))
+
+def create_tasks_for_domain(domain: str, domain_cfg: dict) -> List[dict]:
+    """Создает задачи мониторинга для домена"""
+    tasks = []
+    monitor_cfg = domain_cfg.get("monitor", {})
+    
+    for target in monitor_cfg.get("targets", []):
+        if "ip" not in target or "port" not in target:
+            continue
+        
+        tasks.append({
+            "check_name": f"{domain}:{target['ip']}:{target['port']}",
+            "domain": domain,
+            "target_ip": target["ip"],
+            "port": target["port"],
+            "type": monitor_cfg.get("mode", "tcp"),
+            "timeout_sec": domain_cfg.get("agent", {}).get("timeout_sec", 10),
+            "interval_sec": domain_cfg.get("agent", {}).get("interval_sec", 30)
+        })
+    
+    return tasks
