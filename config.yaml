@@ -16,7 +16,7 @@ zones:
           - "10.10.10.254"
           - "10.10.10.253"
         server:
-          policy: any
+          policy: priority
           timeout_sec: 60
         monitor:
           mode: tcp
@@ -27,7 +27,7 @@ zones:
               priority: 10
             - ip: 34.117.59.81
               port: 80
-              priority: 2
+              priority: 10
         agent:
           interval_sec: 10     # для агента
           timeout_sec: 5

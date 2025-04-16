@@ -33,22 +33,27 @@ class FailoverResolver(BaseResolver):
         qtype = QTYPE[request.q.qtype]
         reply = request.reply()
 
-        try:
-            # Проверяем, есть ли такой домен в нашей конфигурации
-            domain_cfg = get_domain_config(qname) # Используем функцию из logic
-            if not domain_cfg:
-                logger.debug(f"Domain not configured or handled by this server: {qname}")
-                # Не отвечаем на запросы для неконфигурированных доменов
-                # Можно настроить пересылку на другие серверы, если нужно
-                return reply # Возвращаем пустой ответ (NXDOMAIN неявно)
+        if qtype == "A":
+            ip_list = get_ip_for_domain(qname)
+            ttl = get_ttl_for_domain(qname)
 
-            if qtype == "A":
-                self._process_a_record(qname, reply, domain_cfg) # Передаем domain_cfg
-            else:
-                logger.warning(f"Unsupported query type: {qtype} for domain {qname}")
-        except Exception as e:
-            logger.exception(f"Failed to process query for {qname}: {e}") # Используем logger.exception для traceback
-            return reply # Возвращаем пустой ответ при ошибке
+            domain_cfg = get_domain_config(qname)
+            policy = domain_cfg.get("server", {}).get("policy", "any")
+            is_fallback = using_fallback(ip_list, qname)
+            priority_mode = is_priority_mode(domain_cfg)
+
+            if ip_list:
+                if policy == "priority" and priority_mode and not is_fallback:
+                    ip = ip_list[0]
+                    reply.add_answer(RR(qname, QTYPE.A, rdata=A(ip), ttl=ttl))
+                    log.debug(f"Resolved {qname} → {ip} (TTL={ttl}) [priority mode]")
+                else:
+                    idx = _rr_counters.setdefault(qname, 0)
+                    rotated = ip_list[idx:] + ip_list[:idx]
+                    _rr_counters[qname] = (idx + 1) % len(ip_list)
+                    for ip in rotated:
+                        reply.add_answer(RR(qname, QTYPE.A, rdata=A(ip), ttl=ttl))
+                    log.debug(f"Resolved {qname} → {rotated} (TTL={ttl}) [round-robin or fallback]")
 
         return reply
 
