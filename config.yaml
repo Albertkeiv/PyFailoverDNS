@@ -9,14 +9,13 @@ api:
 
 zones:
   - name: "failover"
-    fallback_ttl: 30
     domains:
       webmail.failover:
         fallback:
           - "10.10.10.254"
           - "10.10.10.253"
         server:
-          policy: priority
+          policy: any
           timeout_sec: 60
         monitor:
           mode: tcp
@@ -24,10 +23,10 @@ zones:
           targets:
             - ip: 208.95.112.1
               port: 80
-              priority: 10
+              priority: 5
             - ip: 34.117.59.81
               port: 80
-              priority: 10
+              priority: 8
         agent:
           interval_sec: 10     # для агента
           timeout_sec: 5
