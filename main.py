@@ -197,10 +197,10 @@ def generate_tasks(tags: List[str], token: Optional[str]) -> List[MonitorTask]:
             if expected_token and token != expected_token:
                 continue
             monitor = cfg.get("monitor", {})
-            tag_match = monitor.get("monitor_tag")
+            tag_match = monitor.get("monitor_tag", [])
             if isinstance(tag_match, str):
                 tag_match = [t.strip() for t in tag_match.replace(",", " ").split()]
-            if not set(tags) & set(tag_match):
+            if tag_match and not set(tags) & set(tag_match):
                 continue
             for t in monitor.get("targets", []):
                 tasks.append(MonitorTask(
